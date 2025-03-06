@@ -1,0 +1,7 @@
+build
+build/*
+ensight/*
+ensight
+monitor
+monitor/*
+nga.*
