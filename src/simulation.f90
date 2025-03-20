@@ -59,7 +59,6 @@ module simulation
 
    real(WP) :: SMALL = 1.0E-12_WP
 
-   real(WP) :: criticalPVF = 0.8_WP
 
    !> Check for stabilization
    logical :: stabilization
@@ -68,18 +67,6 @@ module simulation
 
 
 contains
-
-   function limit(val) result(res)
-      real(WP), intent(in) :: val
-      real(WP) :: res
-      real(WP) :: threshold
-      threshold=1.0E-12_WP
-      if ((-threshold.lt.val).and.(val.lt.threshold)) then
-         res=0.0_WP
-      else
-         res=val
-      end if
-   end function limit
 
    subroutine computeDiffU
       integer :: i,j,k
@@ -117,38 +104,38 @@ contains
          end do
       end do
 
-      call cfg%sync(SdiffU); call cfg%sync(PdiffU)
-      call cfg%sync(SdiffV); call cfg%sync(PdiffV)
-      call cfg%sync(SdiffW); call cfg%sync(PdiffW)
+      call cfg%sync(PdiffU); call cfg%sync(PdiffV); call cfg%sync(PdiffW)
+      call cfg%sync(SdiffU); call cfg%sync(SdiffV); call cfg%sync(SdiffW)
 
+      ! interpolate the diffusion velocity to the cell center, only for output
       do k=cfg%kmino_,cfg%kmaxo_
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_-1
-               PdiffUi(i,j,k) = sum(fs%itpu_x(:,i,j,k)*PdiffU(i:i+1,j,k))
-               SdiffUi(i,j,k) = sum(fs%itpu_x(:,i,j,k)*SdiffU(i:i+1,j,k))
+               PdiffUi(i,j,k) = sum(vf%itp_x(:,i,j,k)*PdiffU(i:i+1,j,k))
+               SdiffUi(i,j,k) = sum(vf%itp_x(:,i,j,k)*SdiffU(i:i+1,j,k))
             end do
          end do
       end do
       do k=cfg%kmino_,cfg%kmaxo_
          do j=cfg%jmino_,cfg%jmaxo_-1
             do i=cfg%imino_,cfg%imaxo_
-               PdiffVi(i,j,k) = sum(fs%itpv_y(:,i,j,k)*PdiffV(i,j:j+1,k))
-               SdiffVi(i,j,k) = sum(fs%itpv_y(:,i,j,k)*SdiffV(i,j:j+1,k))
+               PdiffVi(i,j,k) = sum(vf%itp_y(:,i,j,k)*PdiffV(i,j:j+1,k))
+               SdiffVi(i,j,k) = sum(vf%itp_y(:,i,j,k)*SdiffV(i,j:j+1,k))
             end do
          end do
       end do
       do k=cfg%kmino_,cfg%kmaxo_-1
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
-               PdiffWi(i,j,k) = sum(fs%itpw_z(:,i,j,k)*PdiffW(i,j,k:k+1))
-               SdiffWi(i,j,k) = sum(fs%itpw_z(:,i,j,k)*SdiffW(i,j,k:k+1))
+               PdiffWi(i,j,k) = sum(vf%itp_z(:,i,j,k)*PdiffW(i,j,k:k+1))
+               SdiffWi(i,j,k) = sum(vf%itp_z(:,i,j,k)*SdiffW(i,j,k:k+1))
             end do
          end do
       end do
       ! Add last layer in each direction
-      if (.not.cfg%xper.and.cfg%iproc.eq.cfg%npx) PdiffUi(cfg%imaxo,:,:)=PdiffU(cfg%imaxo,:,:) ; SdiffUi(cfg%imaxo,:,:)=SdiffU(cfg%imaxo,:,:)
-      if (.not.cfg%yper.and.cfg%jproc.eq.cfg%npy) PdiffVi(:,cfg%jmaxo,:)=PdiffV(:,cfg%jmaxo,:) ; SdiffVi(:,cfg%jmaxo,:)=SdiffV(:,cfg%jmaxo,:)
-      if (.not.cfg%zper.and.cfg%kproc.eq.cfg%npz) PdiffWi(:,:,cfg%kmaxo)=PdiffW(:,:,cfg%kmaxo) ; SdiffWi(:,:,cfg%kmaxo)=SdiffW(:,:,cfg%kmaxo)
+      !if ((.not.cfg%xper).and.(cfg%iproc.eq.cfg%npx)) PdiffUi(cfg%imaxo,:,:)=PdiffU(cfg%imaxo,:,:) ; SdiffUi(cfg%imaxo,:,:)=SdiffU(cfg%imaxo,:,:)
+      !if ((.not.cfg%yper).and.(cfg%jproc.eq.cfg%npy)) PdiffVi(:,cfg%jmaxo,:)=PdiffV(:,cfg%jmaxo,:) ; SdiffVi(:,cfg%jmaxo,:)=SdiffV(:,cfg%jmaxo,:)
+      !if ((.not.cfg%zper).and.(cfg%kproc.eq.cfg%npz)) PdiffWi(:,:,cfg%kmaxo)=PdiffW(:,:,cfg%kmaxo) ; SdiffWi(:,:,cfg%kmaxo)=SdiffW(:,:,cfg%kmaxo)
 
       call cfg%sync(PdiffUi); call cfg%sync(SdiffUi)
       call cfg%sync(PdiffVi); call cfg%sync(SdiffVi)
@@ -174,10 +161,6 @@ contains
                gradU(1,1,i,j,k) = gradU(1,1,i,j,k) + sum(fs%grdu_x(:,i,j,k)*SdiffU(i:i+1,j,k))!*(1.0_WP-0.5*(1+erf((phi2x-criticalPVF)/0.05_WP)))
                gradU(2,2,i,j,k) = gradU(2,2,i,j,k) + sum(fs%grdv_y(:,i,j,k)*SdiffV(i,j:j+1,k))!*(1.0_WP-0.5*(1+erf((phi2y-criticalPVF)/0.05_WP)))
                gradU(3,3,i,j,k) = gradU(3,3,i,j,k) + sum(fs%grdw_z(:,i,j,k)*SdiffW(i,j,k:k+1))!*(1.0_WP-0.5*(1+erf((phi2z-criticalPVF)/0.05_WP)))
-
-               ! gradU(1,1,i,j,k) = limit(gradU(1,1,i,j,k))
-               ! gradU(2,2,i,j,k) = limit(gradU(2,2,i,j,k))
-               ! gradU(3,3,i,j,k) = limit(gradU(3,3,i,j,k))
 
             end do
          end do
@@ -218,12 +201,6 @@ contains
                gradu(3,2,i,j,k) = gradu(3,2,i,j,k) + 0.25_WP*sum(dvdz(i,j:j+1,k:k+1))
                gradu(1,3,i,j,k) = gradu(1,3,i,j,k) + 0.25_WP*sum(dwdx(i:i+1,j,k:k+1))
                gradu(2,3,i,j,k) = gradu(2,3,i,j,k) + 0.25_WP*sum(dwdy(i,j:j+1,k:k+1))
-               ! gradu(2,1,i,j,k) = limit(gradu(2,1,i,j,k))
-               ! gradu(3,1,i,j,k) = limit(gradu(3,1,i,j,k))
-               ! gradu(1,2,i,j,k) = limit(gradu(1,2,i,j,k))
-               ! gradu(3,2,i,j,k) = limit(gradu(3,2,i,j,k))
-               ! gradu(1,3,i,j,k) = limit(gradu(1,3,i,j,k))
-               ! gradu(2,3,i,j,k) = limit(gradu(2,3,i,j,k))
             end do
          end do
       end do
@@ -267,7 +244,7 @@ contains
       maxSdiffW = maxval(SdiffW) ; minSdiffW = minval(SdiffW)
    end subroutine getDiffMax
 
-   subroutine dynamicDiffutionCoeff
+   subroutine getDiffutionCoeff
       integer :: i,j,k
       real(WP) :: diff, phi1
       vf%diff = 0.0_WP
@@ -281,7 +258,7 @@ contains
          end do
       end do
       call cfg%sync(vf%diff)
-   end subroutine dynamicDiffutionCoeff
+   end subroutine getDiffutionCoeff
 
    subroutine getRelaxTime
       integer :: i,j,k
@@ -487,7 +464,7 @@ contains
          vf%rho = rho
          call param_read('diffusion coefficient 0',diff0)
          call param_read('scaling factor',ad)
-         call dynamicDiffutionCoeff()
+         call getDiffutionCoeff()
 
       end block initialize_volume_fraction
 
@@ -669,7 +646,7 @@ contains
 
             ! ==================== Volume Fraction Solver ==================
 
-            call dynamicDiffutionCoeff()
+            call getDiffutionCoeff()
 
             call vf%metric_reset()
 
@@ -693,6 +670,7 @@ contains
                   end do
                end do
             end do
+            ! all bquick to avoid oscillations
             vfbqflag = .true.
 
             ! Adjust metrics
