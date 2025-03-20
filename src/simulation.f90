@@ -32,7 +32,7 @@ module simulation
    type(event)    :: ens_evt
 
    !> Simulation monitor file
-   type(monitor) :: mfile,cflfile,scfile
+   type(monitor) :: mfile,cflfile,scfile,Difffile
 
    public :: simulation_init,simulation_run,simulation_final
 
@@ -44,18 +44,42 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: SdiffUi,SdiffVi,SdiffWi
    real(WP), dimension(:,:,:), allocatable :: PdiffUi,PdiffVi,PdiffWi
    real(WP) :: visc, rho
-   real(WP), dimension(:,:,:), allocatable :: resVF     ! volume fraction residual
+   real(WP), dimension(:,:,:), allocatable :: resVF,  vfTmp     ! volume fraction residual
+   logical, dimension(:,:,:), allocatable :: vfbqflag
 
+   real(WP), dimension(:,:,:), allocatable :: relaxTime
    real(WP), dimension(:,:,:,:),   allocatable :: resSC,SCtmp,SR
    real(WP), dimension(:,:,:,:),   allocatable :: stress
-   real(WP), dimension(:,:,:,:,:), allocatable :: gradU 
+   real(WP), dimension(:,:,:,:,:), allocatable :: gradU
+   real(WP), dimension(:,:,:), allocatable :: gradUxx
 
-   real(WP) :: threshold = 1.0E-13_WP
+   real(WP) :: diff0, ad
 
-   !> Check for stabilization 
-   logical :: stabilization 
+   real(WP) :: threshold = 1.0E-5_WP
+
+   real(WP) :: SMALL = 1.0E-12_WP
+
+   real(WP) :: criticalPVF = 0.8_WP
+
+   !> Check for stabilization
+   logical :: stabilization
+
+   real(WP) :: maxSdiffU, maxSdiffV, maxSdiffW, minSdiffU, minSdiffV, minSdiffW
+
 
 contains
+
+   function limit(val) result(res)
+      real(WP), intent(in) :: val
+      real(WP) :: res
+      real(WP) :: threshold
+      threshold=1.0E-12_WP
+      if ((-threshold.lt.val).and.(val.lt.threshold)) then
+         res=0.0_WP
+      else
+         res=val
+      end if
+   end function limit
 
    subroutine computeDiffU
       integer :: i,j,k
@@ -65,9 +89,12 @@ contains
       SdiffU = 0.0_WP; SdiffV = 0.0_WP; SdiffW = 0.0_WP
       PdiffU = 0.0_WP; PdiffV = 0.0_WP; PdiffW = 0.0_WP
 
-      do k=cfg%kmino_,cfg%kmaxo_+1
-         do j=cfg%jmino_,cfg%jmaxo_+1
-            do i=cfg%imino_,cfg%imaxo_+1
+      call vf%metric_reset()
+      call cfg%sync(vf%SC)
+
+      do k=cfg%kmin_,cfg%kmax_+1
+         do j=cfg%jmin_,cfg%jmax_+1
+            do i=cfg%imin_,cfg%imax_+1
                ! fx, fy, fz are the diffusion flux of polymer D*grad(u)
                fx = sum(vf%itp_x(:,i,j,k)*vf%diff(i-1:i,j,k))*sum(vf%grdsc_x(:,i,j,k)*vf%SC(i-1:i,j,k))
                fy = sum(vf%itp_y(:,i,j,k)*vf%diff(i,j-1:j,k))*sum(vf%grdsc_y(:,i,j,k)*vf%SC(i,j-1:j,k))
@@ -82,9 +109,9 @@ contains
                if (phi2y .gt. threshold) PdiffV(i,j,k) = -fy/phi2y
                if (phi2z .gt. threshold) PdiffW(i,j,k) = -fz/phi2z
 
-               if ((1.0_WP-phi2x) .gt. threshold) SdiffU(i,j,k) = fx/(1.0_WP-phi2x)
-               if ((1.0_WP-phi2y) .gt. threshold) SdiffV(i,j,k) = fy/(1.0_WP-phi2y)
-               if ((1.0_WP-phi2z) .gt. threshold) SdiffW(i,j,k) = fz/(1.0_WP-phi2z)
+               if ((1.0_WP-phi2x) .gt. threshold) SdiffU(i,j,k) = fx/((1.0_WP-phi2x)+SMALL)!*(1.0_WP-0.5_WP*(1.0_WP+erf((phi2x-criticalPVF)/0.03_WP)))
+               if ((1.0_WP-phi2y) .gt. threshold) SdiffV(i,j,k) = fy/((1.0_WP-phi2y)+SMALL)!*(1.0_WP-0.5_WP*(1.0_WP+erf((phi2y-criticalPVF)/0.03_WP)))
+               if ((1.0_WP-phi2z) .gt. threshold) SdiffW(i,j,k) = fz/((1.0_WP-phi2z)+SMALL)!*(1.0_WP-0.5_WP*(1.0_WP+erf((phi2z-criticalPVF)/0.03_WP)))
 
             end do
          end do
@@ -119,9 +146,9 @@ contains
          end do
       end do
       ! Add last layer in each direction
-      if (.not.fs%cfg%xper.and.fs%cfg%iproc.eq.fs%cfg%npx) PdiffUi(cfg%imaxo,:,:)=PdiffU(cfg%imaxo,:,:) ; SdiffUi(cfg%imaxo,:,:)=SdiffU(cfg%imaxo,:,:)
-      if (.not.fs%cfg%yper.and.fs%cfg%jproc.eq.fs%cfg%npy) PdiffVi(:,cfg%jmaxo,:)=PdiffV(:,cfg%jmaxo,:) ; SdiffVi(:,cfg%jmaxo,:)=SdiffV(:,cfg%jmaxo,:)
-      if (.not.fs%cfg%zper.and.fs%cfg%kproc.eq.fs%cfg%npz) PdiffWi(:,:,cfg%kmaxo)=PdiffW(:,:,cfg%kmaxo) ; SdiffWi(:,:,cfg%kmaxo)=SdiffW(:,:,cfg%kmaxo)
+      if (.not.cfg%xper.and.cfg%iproc.eq.cfg%npx) PdiffUi(cfg%imaxo,:,:)=PdiffU(cfg%imaxo,:,:) ; SdiffUi(cfg%imaxo,:,:)=SdiffU(cfg%imaxo,:,:)
+      if (.not.cfg%yper.and.cfg%jproc.eq.cfg%npy) PdiffVi(:,cfg%jmaxo,:)=PdiffV(:,cfg%jmaxo,:) ; SdiffVi(:,cfg%jmaxo,:)=SdiffV(:,cfg%jmaxo,:)
+      if (.not.cfg%zper.and.cfg%kproc.eq.cfg%npz) PdiffWi(:,:,cfg%kmaxo)=PdiffW(:,:,cfg%kmaxo) ; SdiffWi(:,:,cfg%kmaxo)=SdiffW(:,:,cfg%kmaxo)
 
       call cfg%sync(PdiffUi); call cfg%sync(SdiffUi)
       call cfg%sync(PdiffVi); call cfg%sync(SdiffVi)
@@ -133,42 +160,56 @@ contains
       ! add extra solvent diffusion velocity to calculate the gradU for viscoelastic solver
       integer :: i,j,k
       real(WP), dimension(:,:,:), allocatable :: dudy,dudz,dvdx,dvdz,dwdx,dwdy
+      real(WP) :: phi2x, phi2y, phi2z
 
       ! Compute dudx, dvdy, and dwdz first
-	   do k=cfg%kmin_,cfg%kmax_
+      do k=cfg%kmin_,cfg%kmax_
          do j=cfg%jmin_,cfg%jmax_
             do i=cfg%imin_,cfg%imax_
-               gradU(1,1,i,j,k) = gradU(1,1,i,j,k) + sum(fs%grdu_x(:,i,j,k)*SdiffU(i:i+1,j,k))
-               gradU(2,2,i,j,k) = gradU(2,2,i,j,k) + sum(fs%grdv_y(:,i,j,k)*SdiffV(i,j:j+1,k))
-               gradU(3,3,i,j,k) = gradU(3,3,i,j,k) + sum(fs%grdw_z(:,i,j,k)*SdiffW(i,j,k:k+1))
+
+               phi2x = sum(vf%itp_x(:,i,j,k)*vf%SC(i:i+1,j,k))
+               phi2y = sum(vf%itp_y(:,i,j,k)*vf%SC(i,j:j+1,k))
+               phi2z = sum(vf%itp_z(:,i,j,k)*vf%SC(i,j,k:k+1))
+
+               gradU(1,1,i,j,k) = gradU(1,1,i,j,k) + sum(fs%grdu_x(:,i,j,k)*SdiffU(i:i+1,j,k))!*(1.0_WP-0.5*(1+erf((phi2x-criticalPVF)/0.05_WP)))
+               gradU(2,2,i,j,k) = gradU(2,2,i,j,k) + sum(fs%grdv_y(:,i,j,k)*SdiffV(i,j:j+1,k))!*(1.0_WP-0.5*(1+erf((phi2y-criticalPVF)/0.05_WP)))
+               gradU(3,3,i,j,k) = gradU(3,3,i,j,k) + sum(fs%grdw_z(:,i,j,k)*SdiffW(i,j,k:k+1))!*(1.0_WP-0.5*(1+erf((phi2z-criticalPVF)/0.05_WP)))
+
+               ! gradU(1,1,i,j,k) = limit(gradU(1,1,i,j,k))
+               ! gradU(2,2,i,j,k) = limit(gradU(2,2,i,j,k))
+               ! gradU(3,3,i,j,k) = limit(gradU(3,3,i,j,k))
+
             end do
          end do
       end do
 
       ! Allocate velocity gradient components
-	   allocate(dudy(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+      allocate(dudy(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       allocate(dudz(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       allocate(dvdx(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       allocate(dvdz(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       allocate(dwdx(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       allocate(dwdy(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-      
+
       ! Calculate components of the velocity gradient at their natural locations with an extra cell for interpolation
-	   do k=cfg%kmin_,cfg%kmax_+1
+      do k=cfg%kmin_,cfg%kmax_+1
          do j=cfg%jmin_,cfg%jmax_+1
             do i=cfg%imin_,cfg%imax_+1
-               dudy(i,j,k)=sum(fs%grdu_y(:,i,j,k)*SdiffU(i,j-1:j,k))
-               dudz(i,j,k)=sum(fs%grdu_z(:,i,j,k)*SdiffU(i,j,k-1:k))
-               dvdx(i,j,k)=sum(fs%grdv_x(:,i,j,k)*SdiffV(i-1:i,j,k))
-               dvdz(i,j,k)=sum(fs%grdv_z(:,i,j,k)*SdiffV(i,j,k-1:k))
-               dwdx(i,j,k)=sum(fs%grdw_x(:,i,j,k)*SdiffW(i-1:i,j,k))
-               dwdy(i,j,k)=sum(fs%grdw_y(:,i,j,k)*SdiffW(i,j-1:j,k))
+               phi2x = sum(vf%itp_x(:,i,j,k)*vf%SC(i-1:i,j,k))
+               phi2y = sum(vf%itp_y(:,i,j,k)*vf%SC(i,j-1:j,k))
+               phi2z = sum(vf%itp_z(:,i,j,k)*vf%SC(i,j,k-1:k))
+               dudy(i,j,k)=sum(fs%grdu_y(:,i,j,k)*SdiffU(i,j-1:j,k))!*(1.0_WP-0.5*(1+erf((phi2y-criticalPVF)/0.05_WP)))
+               dudz(i,j,k)=sum(fs%grdu_z(:,i,j,k)*SdiffU(i,j,k-1:k))!*(1.0_WP-0.5*(1+erf((phi2z-criticalPVF)/0.05_WP)))
+               dvdx(i,j,k)=sum(fs%grdv_x(:,i,j,k)*SdiffV(i-1:i,j,k))!*(1.0_WP-0.5*(1+erf((phi2x-criticalPVF)/0.05_WP)))
+               dvdz(i,j,k)=sum(fs%grdv_z(:,i,j,k)*SdiffV(i,j,k-1:k))!*(1.0_WP-0.5*(1+erf((phi2z-criticalPVF)/0.05_WP)))
+               dwdx(i,j,k)=sum(fs%grdw_x(:,i,j,k)*SdiffW(i-1:i,j,k))!*(1.0_WP-0.5*(1+erf((phi2x-criticalPVF)/0.05_WP)))
+               dwdy(i,j,k)=sum(fs%grdw_y(:,i,j,k)*SdiffW(i,j-1:j,k))!*(1.0_WP-0.5*(1+erf((phi2y-criticalPVF)/0.05_WP)))
             end do
          end do
       end do
 
       ! Interpolate off-diagonal components of the velocity gradient to the cell center
-	   do k=cfg%kmin_,cfg%kmax_
+      do k=cfg%kmin_,cfg%kmax_
          do j=cfg%jmin_,cfg%jmax_
             do i=cfg%imin_,cfg%imax_
                gradu(2,1,i,j,k) = gradu(2,1,i,j,k) + 0.25_WP*sum(dudy(i:i+1,j:j+1,k))
@@ -177,12 +218,18 @@ contains
                gradu(3,2,i,j,k) = gradu(3,2,i,j,k) + 0.25_WP*sum(dvdz(i,j:j+1,k:k+1))
                gradu(1,3,i,j,k) = gradu(1,3,i,j,k) + 0.25_WP*sum(dwdx(i:i+1,j,k:k+1))
                gradu(2,3,i,j,k) = gradu(2,3,i,j,k) + 0.25_WP*sum(dwdy(i,j:j+1,k:k+1))
+               ! gradu(2,1,i,j,k) = limit(gradu(2,1,i,j,k))
+               ! gradu(3,1,i,j,k) = limit(gradu(3,1,i,j,k))
+               ! gradu(1,2,i,j,k) = limit(gradu(1,2,i,j,k))
+               ! gradu(3,2,i,j,k) = limit(gradu(3,2,i,j,k))
+               ! gradu(1,3,i,j,k) = limit(gradu(1,3,i,j,k))
+               ! gradu(2,3,i,j,k) = limit(gradu(2,3,i,j,k))
             end do
          end do
       end do
-      
+
       ! Apply a Neumann condition in non-periodic directions
-	   if (.not.cfg%xper) then
+      if (.not.cfg%xper) then
          if (cfg%iproc.eq.1)            gradu(:,:,cfg%imin-1,:,:)=gradu(:,:,cfg%imin,:,:)
          if (cfg%iproc.eq.cfg%npx) gradu(:,:,cfg%imax+1,:,:)=gradu(:,:,cfg%imax,:,:)
       end if
@@ -194,24 +241,62 @@ contains
          if (cfg%kproc.eq.1)            gradu(:,:,:,:,cfg%kmin-1)=gradu(:,:,:,:,cfg%kmin)
          if (cfg%kproc.eq.cfg%npz) gradu(:,:,:,:,cfg%kmax+1)=gradu(:,:,:,:,cfg%kmax)
       end if
-      
+
       ! Ensure zero in walls
-	   do k=cfg%kmino_,cfg%kmaxo_
+      do k=cfg%kmino_,cfg%kmaxo_
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
                if (fs%mask(i,j,k).eq.1) gradu(:,:,i,j,k)=0.0_WP
             end do
          end do
       end do
-      
-      ! Sync it
-	   call cfg%sync(gradu)
-      
-      ! Deallocate velocity gradient storage
-	   deallocate(dudy,dudz,dvdx,dvdz,dwdx,dwdy)
 
+      gradUxx = gradU(1,1,:,:,:)
+
+      ! Sync it
+      call cfg%sync(gradu)
+      call cfg%sync(gradUxx)
+
+      ! Deallocate velocity gradient storage
+      deallocate(dudy,dudz,dvdx,dvdz,dwdx,dwdy)
    end subroutine applyExtraGradU
 
+   subroutine getDiffMax
+      maxSdiffU = maxval(SdiffU) ; minSdiffU = minval(SdiffU)
+      maxSdiffV = maxval(SdiffV) ; minSdiffV = minval(SdiffV)
+      maxSdiffW = maxval(SdiffW) ; minSdiffW = minval(SdiffW)
+   end subroutine getDiffMax
+
+   subroutine dynamicDiffutionCoeff
+      integer :: i,j,k
+      real(WP) :: diff, phi1
+      vf%diff = 0.0_WP
+      do k=cfg%kmin_,cfg%kmax_
+         do j=cfg%jmin_,cfg%jmax_
+            do i=cfg%imin_,cfg%imax_
+               phi1 = 1.0_WP-vf%SC(i,j,k)    ! phi1 is solvent volume fraction
+               diff = diff0*exp(ad*phi1)
+               vf%diff(i,j,k) = diff
+            end do
+         end do
+      end do
+      call cfg%sync(vf%diff)
+   end subroutine dynamicDiffutionCoeff
+
+   subroutine getRelaxTime
+      integer :: i,j,k
+      real(WP) :: phi2
+      relaxTime =ve%trelax
+      do k=cfg%kmino_,cfg%kmaxo_
+         do j=cfg%jmino_,cfg%jmaxo_
+            do i=cfg%imino_,cfg%imaxo_
+               phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
+               relaxTime(i,j,k) = ve%trelax*(1.0+phi2*100_WP)
+            end do
+         end do
+      end do
+      call cfg%sync(relaxTime)
+   end subroutine getRelaxTime
 
    !> Initialization of problem solver
    subroutine simulation_init
@@ -254,9 +339,9 @@ contains
 
       ! Create a volume fraction scalar solver
       create_vf_solver: block
-         use vdscalar_class, only: dirichlet,neumann,quick
+         use vdscalar_class, only: dirichlet,neumann,upwind,bquick
          ! Create volume fraction scalar solver
-         vf=vdscalar(cfg=cfg,scheme=quick,name='Volume fraction')
+         vf=vdscalar(cfg=cfg,scheme=bquick,name='Volume fraction')
          ! Configure implicit scalar solver
          vfs = ddadi(cfg=cfg,name='Volume fraction',nst=13)
          ! Setup the solver
@@ -266,10 +351,8 @@ contains
       ! Create a viscoelastic solver
       create_viscoelastic: block
          use multiscalar_class,   only: bquick, upwind
-         use viscoelastic_class,  only: fenep
+         use viscoelastic_class,  only: oldroydb, fenep
          integer :: i,j,k
-         ! use density of 1
-         ve%rho=rho
          ! Create FENE model solver
          call ve%init(cfg=cfg,model=fenep,scheme=upwind,name='FENE')
          ! Maximum extensibility of polymer chain
@@ -282,22 +365,24 @@ contains
          ves=ddadi(cfg=cfg,name='scalar',nst=13)
          ! Setup the solver
          call ve%setup(implicit_solver=ves)
-         
-         ! Check first if we use stabilization
-         call param_read('Stabilization',stabilization,default=.false.)
+         ! call ve%setup()
 
-         if (stabilization) then 
+         ! Check first if we use stabilization
+         call param_read('Stabilization',stabilization,default=.true.)
+
+         if (stabilization) then
             !> Allocate storage fo eigenvalues and vectors
             allocate(ve%eigenval    (1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval=0.0_WP
             allocate(ve%eigenvec(1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenvec=0.0_WP
+            allocate(ve%eigenval_log(1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval_log=0.0_WP
             !> Allocate storage for reconstructured C
             allocate(ve%SCrec   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6)); ve%SCrec=0.0_WP
             do k=cfg%kmino_,cfg%kmaxo_
                do j=cfg%jmino_,cfg%jmaxo_
                   do i=cfg%imino_,cfg%imaxo_
-                        ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
-                        ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
-                        ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
+                     ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
+                     ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
+                     ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
                   end do
                end do
             end do
@@ -319,6 +404,8 @@ contains
          allocate(Vi      (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(Wi      (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(resVF   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+         allocate(vfbqflag(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+         allocate(vfTmp   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
          allocate(SdiffU  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(SdiffV  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -332,13 +419,17 @@ contains
          allocate(SdiffWi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; SdiffWi = 0.0_WP
          allocate(PdiffUi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffUi = 0.0_WP
          allocate(PdiffVi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffVi = 0.0_WP
-         allocate(PdiffWi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ;   PdiffWi = 0.0_WP
+         allocate(PdiffWi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffWi = 0.0_WP
+
+         allocate(relaxTime(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
          allocate(resSC (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(SCtmp (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(SR    (1:6,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(stress(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(gradU (1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+
+         allocate(gradUxx(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
       end block allocate_work_arrays
 
@@ -364,25 +455,40 @@ contains
 
       initialize_volume_fraction: block
          use param, only: param_read
-         real(WP) :: diameter, x, y, z, diff
-         integer :: i,j,k
+         real(WP) :: diameter, diff, distace
+         real(WP) :: x1, y1, z1, x2, y2, z2
+         integer :: i,j,k,n
+         real(WP), dimension(8,3) :: vertices
+         real(WP), dimension(8) :: isInside
          ! Initialize volume fraction
          call param_read('polymer diameter',diameter)
+
          vf%SC = 0.0_WP
          do k=cfg%kmino_,cfg%kmaxo_
             do j=cfg%jmino_,cfg%jmaxo_
                do i=cfg%imino_,cfg%imaxo_
-                  x = cfg%x(i); y = cfg%y(j); z = cfg%z(k)
-                  if ((x**2+y**2+z**2).lt. diameter**2/4.0_WP) then
-                     vf%SC(i,j,k) = 1.0_WP
-                  end if
+                  x1 = cfg%x(i); y1 = cfg%y(j); z1 = cfg%z(k)
+                  x2 = cfg%x(i+1); y2 = cfg%y(j+1); z2 = cfg%z(k+1)
+                  vertices(1,:) = [x1,y1,z1] ; vertices(2,:) = [x2,y1,z1] ; vertices(3,:) = [x2,y2,z1] ; vertices(4,:) = [x1,y2,z1]
+                  vertices(5,:) = [x1,y1,z2] ; vertices(6,:) = [x2,y1,z2] ; vertices(7,:) = [x2,y2,z2] ; vertices(8,:) = [x1,y2,z2]
+                  isInside = 0.0_WP
+                  do n=1,8
+                     distace = (vertices(n,1))**2+(vertices(n,2))**2+(vertices(n,3))**2
+                     if (distace .le. (diameter/2.0_WP)**2) isInside(n) = 1.0_WP
+                  end do
+                  vf%SC(i,j,k) = min(sum(isInside)/8.0_WP,1.0_WP)
                end do
             end do
          end do
+
          ! read diffusivity
-         call param_read('diffusion coefficient',diff)
-         vf%diff = diff
+         ! call param_read('diffusion coefficient',diff)
+         ! vf%diff = diff
          vf%rho = rho
+         call param_read('diffusion coefficient 0',diff0)
+         call param_read('scaling factor',ad)
+         call dynamicDiffutionCoeff()
+
       end block initialize_volume_fraction
 
       ! Add Ensight output
@@ -398,10 +504,17 @@ contains
          call ens_out%add_vector('PolymerDiffVelo',PdiffUi,PdiffVi,PdiffWi)
          call ens_out%add_vector('SolventDiffVelo',SdiffUi,SdiffVi,SdiffWi)
          call ens_out%add_scalar('pressure',fs%P)
-         call ens_out%add_scalar('divergence',fs%div)
+         call ens_out%add_scalar('diffusivity',vf%diff)
+         ! call ens_out%add_scalar('divergence',fs%div)
          call ens_out%add_scalar('volumefraction',vf%SC)
+         call ens_out%add_scalar('gradUxx',gradUxx)
+         call ens_out%add_scalar('relaxTime',relaxTime)
+         call ens_out%add_vector("eigenvalues",ve%eigenval(1,:,:,:),ve%eigenval(2,:,:,:),ve%eigenval(3,:,:,:))
+         ! call ens_out%add_vector("logeigenvalues",ve%eigenval_log(1,:,:,:),ve%eigenval_log(2,:,:,:),ve%eigenval_log(3,:,:,:))
          do nsc=1,ve%nscalar
-            call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SC(:,:,:,nsc))
+            call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SCrec(:,:,:,nsc))
+            ! call ens_out%add_scalar('ln'//trim(ve%SCname(nsc)),ve%SC(:,:,:,nsc))
+            ! call ens_out%add_scalar('sctmp'//trim(ve%SCname(nsc)),SCtmp(:,:,:,nsc))
          end do
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
@@ -412,7 +525,11 @@ contains
          integer :: nsc
          call fs%get_cfl(time%dt,time%cfl)
          call fs%get_max()
-         call ve%get_max_reconstructed()
+         call vf%get_max()
+         call getDiffMax()
+         if (stabilization) then
+            call ve%get_max_reconstructed()
+         end if
          ! Create simulation monitor
          mfile=monitor(fs%cfg%amRoot,'simulation')
          call mfile%add_column(time%n,'Timestep number')
@@ -449,7 +566,17 @@ contains
             end do
          end if
          call scfile%write()
-
+         ! Create Diffusion monitor
+         Difffile=monitor(vf%cfg%amRoot,'Diffusion')
+         call Difffile%add_column(time%n,'Timestep number')
+         call Difffile%add_column(time%t,'Time')
+         call Difffile%add_column(maxSdiffU,'maxSdiffU')
+         call Difffile%add_column(maxSdiffV,'maxSdiffV')
+         call Difffile%add_column(maxSdiffW,'maxSdiffW')
+         call Difffile%add_column(minSdiffU,'minSdiffU')
+         call Difffile%add_column(minSdiffV,'minSdiffV')
+         call Difffile%add_column(minSdiffW,'minSdiffW')
+         call Difffile%write()
       end block create_monitor
 
    end subroutine simulation_init
@@ -478,8 +605,8 @@ contains
          fs%Vold=fs%V; fs%rhoVold=fs%rhoV
          fs%Wold=fs%W; fs%rhoWold=fs%rhoW
 
+         vf%rhoold=vf%rho
          vf%SCold = vf%SC
-         vf%rhoold = vf%rho
 
          ! Remember old scalars
          ve%SCold=ve%SC
@@ -488,12 +615,43 @@ contains
 
          ! Calculate grad(U)
          call fs%get_gradu(gradu)
-         ! call applyExtraGradU()
+         call applyExtraGradU()
+
+         ! Transport our liquid conformation tensor using log conformation
+         advance_scalar: block
+            use, intrinsic :: ieee_arithmetic
+            integer :: ierr
+            integer :: i,j,k,nsc
+            ! Add streching source term for constitutive model
+            call ve%get_CgradU_log(gradU,SCtmp); resSC=SCtmp
+            ve%SC=ve%SC+time%dt*resSC
+            ve%SCold=ve%SC
+            ! Explicit calculation of dSC/dt from scalar equation
+            PdiffU = PdiffU + fs%Uold
+            PdiffV = PdiffV + fs%Vold
+            PdiffW = PdiffW + fs%Wold
+            call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
+            call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
+            ve%SC = ve%SCold + time%dt*resSC
+         end block advance_scalar
 
 
-
-
-
+         ! Add in relaxation forcing and reconstruct C
+         if (stabilization) then
+            ! Get eigenvalues and eigenvectors from lnC
+            call ve%get_eigensystem()
+            ! Reconstruct conformation tensor from eigenvalues and eigenvectors
+            call ve%reconstruct_conformation()
+            ! Add in relaxtion source from semi-anlaytical integration
+            call getRelaxTime()
+            call ve%get_relax_analytical_varyRelxTime(relaxTime,time%dt)
+            ! call ve%get_relax_analytical(time%dt)
+            ! Reconstruct lnC for next time step
+            !> get eigenvalues and eigenvectors based on reconstructed C
+            call ve%get_eigensystem_SCrec()
+            !> Reconstruct lnC from eigenvalues and eigenvectors
+            call ve%reconstruct_log_conformation()
+         end if
 
 
          ! ==============================================================================
@@ -509,95 +667,46 @@ contains
             fs%V=0.5_WP*(fs%V+fs%Vold); fs%rhoV=0.5_WP*(fs%rhoV+fs%rhoVold)
             fs%W=0.5_WP*(fs%W+fs%Wold); fs%rhoW=0.5_WP*(fs%rhoW+fs%rhoWold)
 
-            ! Build mid-time scalar
-            ve%SC=0.5_WP*(ve%SC+ve%SCold)
+            ! ==================== Volume Fraction Solver ==================
+
+            call dynamicDiffutionCoeff()
+
+            call vf%metric_reset()
 
             ! Buid mid-time volume fraction
             vf%SC=0.5_WP*(vf%SC+vf%SCold)
 
-            ! ======================= conformation tensor solver ===========================
+            ! Assembly of explicit residual
+            call vf%get_drhoSCdt(resVF,fs%rhoU,fs%rhoV,fs%rhoW)
+            resVF = time%dt*resVF - (2.0_WP*vf%rho*vf%SC - (vf%rho+vf%rhoold)*vf%SCold)
 
-            ! call applyExtraGradU()
-                        
-            ! Reset interpolation metrics to QUICK scheme
-            call ve%metric_reset()
-            
-            ! Explicit calculation of drhoSC/dt from scalar equation
-            ! PdiffU = PdiffU + fs%Uold
-            ! PdiffV = PdiffV + fs%Vold
-            ! PdiffW = PdiffW + fs%Wold
-            ! call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
-            call ve%get_drhoSCdt(resSC,fs%Uold,fs%Vold,fs%Wold)
-            
-            ! Perform bquick procedure
-            bquick: block
-               use viscoelastic_class, only: fenep,lptt,oldroydb
-               integer :: i,j,k
-               logical, dimension(:,:,:), allocatable :: flag
-               ! Allocate work array
-               allocate(flag(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-               ! Assemble explicit residual
-               resSC=-2.0_WP*(ve%SC-ve%SCold)+time%dt*resSC
-               ! Apply it to get explicit scalar prediction
-               SCtmp=2.0_WP*ve%SC-ve%SCold+resSC
-               ! Check cells that require bquick
-               select case (ve%model)
-               case (fenep)
-                  do k=ve%cfg%kmino_,ve%cfg%kmaxo_
-                     do j=ve%cfg%jmino_,ve%cfg%jmaxo_
-                        do i=ve%cfg%imino_,ve%cfg%imaxo_
-                           if (SCtmp(i,j,k,1).le.0.0_WP.or.SCtmp(i,j,k,4).le.0.0_WP.or.SCtmp(i,j,k,6).le.0.0_WP.or.&
-                           &   SCtmp(i,j,k,1)+SCtmp(i,j,k,4)+SCtmp(i,j,k,6).ge.ve%Lmax**2) then
-                              flag(i,j,k)=.true.
-                           else
-                              flag(i,j,k)=.false.
-                           end if
-                        end do
-                     end do
+            !< Get temperary solution for bquick
+            vfTmp = 2.0_WP*vf%SC - vf%SCold + resVF/vf%rho
+
+            vfbqflag = .false.
+            do k=vf%cfg%kmino_,vf%cfg%kmaxo_
+               do j=vf%cfg%jmino_,vf%cfg%jmaxo_
+                  do i=vf%cfg%imino_,vf%cfg%imaxo_
+                     if ((vfTmp(i,j,k).lt.0.0_WP).or.(vfTmp(i,j,k).gt.1.0_WP)) then
+                        vfbqflag(i,j,k) = .true.
+                     end if
                   end do
-               case (lptt,oldroydb)
-                  do k=ve%cfg%kmino_,ve%cfg%kmaxo_
-                     do j=ve%cfg%jmino_,ve%cfg%jmaxo_
-                        do i=ve%cfg%imino_,ve%cfg%imaxo_
-                           if (SCtmp(i,j,k,1).le.0.0_WP.or.SCtmp(i,j,k,4).le.0.0_WP.or.SCtmp(i,j,k,6).le.0.0_WP) then
-                              flag(i,j,k)=.true.
-                           else
-                              flag(i,j,k)=.false.
-                           end if
-                        end do
-                     end do
-                  end do
-               end select
-               ! Adjust metrics
-               call ve%metric_adjust(SCtmp,flag)
-               ! Clean up
-               deallocate(flag)
-               ! Recompute drhoSC/dt
-               call ve%get_drhoSCdt(resSC,fs%Uold,fs%Vold,fs%Wold)
-            end block bquick
-            
-            ! Add viscoleastic source terms
-            viscoelastic_src: block
-               use viscoelastic_class, only: fenep,lptt,eptt
-               ! Streching and distortion term
-               call ve%get_CgradU(gradU , SCtmp);  resSC=resSC+SCtmp
-               ! Relaxation term
-               call ve%get_relax(SCtmp , time%dt); resSC=resSC+SCtmp
-               ! Affine term (lPTT and ePTT only)
-               ! if (ve%model.eq.lptt.or.ve%model.eq.eptt) then
-               !    call fs%get_strainrate(SR)
-               !    call ve%get_affine(SR,SCtmp);  resSC=resSC+SCtmp
-               ! end if
-            end block viscoelastic_src
-            
-            ! Assemble explicit residual
-            resSC = -2.0_WP*(ve%SC-ve%SCold) + time%dt*resSC
-            
-            ! Form implicit residual
-            call ve%solve_implicit(time%dt,resSC,fs%Uold,fs%Vold,fs%Wold)
-            
-            ! Update scalars
-            ve%SC=2.0_WP*ve%SC-ve%SCold+resSC
+               end do
+            end do
+            vfbqflag = .true.
+
+            ! Adjust metrics
+            call vf%metric_adjust(vfTmp, vfbqflag)
+
+            ! re-Assemble explicit residual
+            call vf%get_drhoSCdt(resVF,fs%rhoU,fs%rhoV,fs%rhoW)
+            resVF = time%dt*resVF - (2.0_WP*vf%rho*vf%SC - (vf%rho+vf%rhoold)*vf%SCold)
+
+            ! solve implicitlly
+            call vf%solve_implicit(time%dt,resVF,fs%rhoU,fs%rhoV,fs%rhoW)
+
+            ! Apply these residuals
+            vf%SC = 2.0_WP*vf%SC - vf%SCold + resVF
 
             ! ===================== Velocity Solver =======================
 
@@ -610,9 +719,9 @@ contains
             resW=time%dtmid*resW-(2.0_WP*fs%rhoW-2.0_WP*fs%rhoWold)
 
 
-            ! Add polymer stress term
+            ! ! Add polymer stress term
             polymer_stress: block
-               use viscoelastic_class, only: fenep,lptt,eptt
+               use viscoelastic_class, only: fenep,lptt,eptt, oldroydb
                integer :: i,j,k,n
                real(WP), dimension(:,:,:), allocatable :: Txy,Tyz,Tzx
                real(WP) :: coeff
@@ -622,12 +731,12 @@ contains
                allocate(Tzx   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
                ! Build liquid stress tensor
                select case (ve%model)
-               case (fenep)
-                  call ve%get_relax(stress,time%dt)
+                case (fenep, oldroydb)
+                  call ve%get_relax_varyRelaxTime(relaxTime,stress,time%dt)
                   do n=1,6
                      stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
                   end do
-               case (eptt,lptt)
+                case (eptt,lptt)
                   stress=0.0_WP
                   coeff=ve%visc_p/(ve%trelax*(1-ve%affinecoeff))
                   do n=1,6
@@ -667,15 +776,15 @@ contains
                         &                                                 +sum(fs%divv_y(:,i,j,k)*stress(i,j-1:j,k,4))&
                         &                                                 +sum(fs%divv_z(:,i,j,k)*Tyz(i,j,k:k+1)))*time%dt
                         if (fs%wmask(i,j,k).eq.0) resW(i,j,k)=resW(i,j,k)+(sum(fs%divw_x(:,i,j,k)*Tzx(i:i+1,j,k))     &
-                        &                                                 +sum(fs%divw_y(:,i,j,k)*Tyz(i,j:j+1,k))     &                  
-                        &                                                 +sum(fs%divw_z(:,i,j,k)*stress(i,j,k-1:k,6)))*time%dt        
+                        &                                                 +sum(fs%divw_y(:,i,j,k)*Tyz(i,j:j+1,k))     &
+                        &                                                 +sum(fs%divw_z(:,i,j,k)*stress(i,j,k-1:k,6)))*time%dt
                      end do
                   end do
                end do
                ! Clean up
                deallocate(Txy,Tyz,Tzx)
             end block polymer_stress
-            
+
 
             ! Form implicit residuals
             call fs%solve_implicit(time%dtmid,resU,resV,resW)
@@ -704,18 +813,6 @@ contains
             fs%rhoW=fs%rhoW-time%dtmid*resW
             call fs%rho_divide()
 
-            ! ==================== Volume Fraction Solver ==================
-
-            ! Assembly of explicit residual
-            call vf%get_drhoSCdt(resVF,fs%rhoU,fs%rhoV,fs%rhoW)
-            resVF = time%dt*resVF - 2.0_WP*vf%rho*vf%SC + (vf%rho+vf%rhoold)*vf%SCold
-
-            ! solve implicitlly
-            call vf%solve_implicit(time%dt,resVF,fs%rhoU,fs%rhoV,fs%rhoW)
-
-            ! Apply these residuals
-            vf%SC = 2.0_WP*vf%SC - vf%SCold + resVF
-
             ! ==============================================================
 
             ! Increment sub-iteration counter
@@ -726,12 +823,11 @@ contains
 
          ! ==================== Post Process ==================================
 
-         ! Compute diffusion velocity
-         call computeDiffU()
-
          ! Recompute interpolated velocity and divergence
          call fs%interp_vel(Ui,Vi,Wi)
          call fs%get_div(drhodt=resRHO)
+
+         call computeDiffU()
 
          ! Output to ensight
          if (ens_evt%occurs()) then
@@ -740,9 +836,15 @@ contains
 
          ! Perform and output monitoring
          call fs%get_max()
+         call vf%get_max()
+         call getDiffMax()
+         if (stabilization) then
+            call ve%get_max_reconstructed()
+         end if
          call mfile%write()
          call cflfile%write()
-
+         call scfile%write()
+         call Difffile%write()
       end do
 
    end subroutine simulation_run

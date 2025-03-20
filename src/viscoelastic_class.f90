@@ -32,9 +32,10 @@ module viscoelastic_class
       real(WP) :: visc_p                                   !< Viscosity of polymer
       ! Eigensystem storage
       real(WP), dimension(:,:,:,:),   allocatable :: eigenval  !< Field of eigenvalues of the conformation tensor
+      real(WP), dimension(:,:,:,:),   allocatable :: eigenval_log !< Field of eigenvalues of the log-conformation tensor
       real(WP), dimension(:,:,:,:,:), allocatable :: eigenvec  !< Field of eigenvectors of the conformation tensor
       ! Storage for reconstructed conformation tensor
-      real(WP), dimension(:,:,:,:),   allocatable ::SCrec
+      real(WP), dimension(:,:,:,:),   allocatable :: SCrec
       ! Monitoring quantities
       real(WP), dimension(:),     allocatable :: SCrecmax,SCrecmin,SCrecint   !< Maximum and minimum, integral reconstructed scalar feild 
    
@@ -44,7 +45,9 @@ module viscoelastic_class
       procedure :: get_CgradU_log                          !< Calculate streching and distortion term for log-conformation tensor
       procedure :: get_relax                               !< Calculate relaxation term
       procedure :: get_affine                              !< Source term in PTT equation for non-affine motion
-      !procedure :: get_relax_analytical                    !< Calculate relaxation term based on a semi-analytical integration 
+      procedure :: get_relax_analytical                    !< Calculate relaxation term based on a semi-analytical integration 
+      procedure :: get_relax_analytical_varyRelxTime
+      procedure :: get_relax_varyRelaxTime
       procedure :: get_relax_log                           !< Calculate relaxation term for log-conformation tensor
       procedure :: get_eigensystem                         !< Calculate eigenvalues and eigenvectors for conformation tensor
       procedure :: get_eigensystem_SCrec                   !< Calculate eigenvalues and eigenvectors for conformation tensor
@@ -56,6 +59,18 @@ module viscoelastic_class
    
    
 contains
+
+function limit(val) result(res)
+   real(WP), intent(in) :: val
+   real(WP) :: res
+   real(WP) :: threshold
+   threshold=1.0E-6_WP
+   if ((-threshold.lt.val).and.(val.lt.threshold)) then
+      res=0.0_WP
+   else
+      res=val
+   end if
+end function limit
    
    
    !> Viscoelastic model initialization
@@ -173,6 +188,7 @@ contains
                resSC(i,j,k,5)=2.00_WP*B(3,2)+Omega(3,1)*this%SC(i,j,k,2)-Omega(1,2)*this%SC(i,j,k,3)+Omega(3,2)*this%SC(i,j,k,4)-Omega(2,2)*this%SC(i,j,k,5)+Omega(3,3)*this%SC(i,j,k,5)-Omega(3,2)*this%SC(i,j,k,6)
                !>zz tensor component
                resSC(i,j,k,6)=2.00_WP*B(3,3)-Omega(1,3)*this%SC(i,j,k,3)+Omega(3,1)*this%SC(i,j,k,3)-Omega(2,3)*this%SC(i,j,k,5)+Omega(3,2)*this%SC(i,j,k,5)
+
             end do 
          end do
       end do
@@ -337,6 +353,136 @@ contains
       end select
    end subroutine get_relax
 
+      !> Add viscoelastic relaxation source
+   subroutine get_relax_varyRelaxTime(this,trelaxfield,resSC,dt)
+      use messager, only: die
+      implicit none
+      class(viscoelastic), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:,1:), intent(inout) :: resSC
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in) :: trelaxfield
+      real(WP), intent(in) :: dt
+      integer :: i,j,k
+      real(WP) :: coeff, trelax
+      real(WP), parameter :: safety_margin=10.0_WP
+      resSC=0.0_WP
+      select case (this%model)
+      case (fenep) ! Add relaxation source for FENE-P (1/lambda)(f(r)*C-I)
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  coeff=(this%Lmax**2-3.00_WP)/(this%Lmax**2-(this%SC(i,j,k,1)+this%SC(i,j,k,4)+this%SC(i,j,k,6)))
+                  trelax=trelaxfield(i,j,k)
+                  resSC(i,j,k,1)=-(coeff*this%SC(i,j,k,1)-1.0_WP)/trelax !< xx tensor component
+                  resSC(i,j,k,2)=-(coeff*this%SC(i,j,k,2)-0.0_WP)/trelax !< xy tensor component
+                  resSC(i,j,k,3)=-(coeff*this%SC(i,j,k,3)-0.0_WP)/trelax !< xz tensor component
+                  resSC(i,j,k,4)=-(coeff*this%SC(i,j,k,4)-1.0_WP)/trelax !< yy tensor component
+                  resSC(i,j,k,5)=-(coeff*this%SC(i,j,k,5)-0.0_WP)/trelax !< yz tensor component
+                  resSC(i,j,k,6)=-(coeff*this%SC(i,j,k,6)-1.0_WP)/trelax !< zz tensor component
+               end do
+            end do
+         end do
+      case (fenecr) ! Add relaxation source for FENE-CR (f(r)/lambda*(C-I))
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  coeff=1.0_WP-(this%SC(i,j,k,1)+this%SC(i,j,k,4)+this%SC(i,j,k,6))/this%Lmax**2
+                  trelax=trelaxfield(i,j,k)
+                  coeff=max(epsilon(1.0_WP),min(coeff,1.0_WP))*trelax      !< Build a safe adjusted relaxation time scale
+                  coeff=max(coeff,safety_margin*dt)                             !< Further clip based on current time step size for stability
+                  coeff=1.0_WP/coeff                                            !< Inverse coeff
+                  resSC(i,j,k,1)=-coeff*(this%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+                  resSC(i,j,k,2)=-coeff*(this%SC(i,j,k,2)-0.0_WP) !> xy tensor component
+                  resSC(i,j,k,3)=-coeff*(this%SC(i,j,k,3)-0.0_WP) !> xz tensor component
+                  resSC(i,j,k,4)=-coeff*(this%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+                  resSC(i,j,k,5)=-coeff*(this%SC(i,j,k,5)-0.0_WP) !> yz tensor component
+                  resSC(i,j,k,6)=-coeff*(this%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+               end do
+            end do
+         end do
+      case (clipped_fenecr) ! Add relaxation source for FENE-CR (f(r)*(C-I))
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  trelax=trelaxfield(i,j,k)
+                  ! Clip conformation tensor to reasonable values
+                  this%SC(i,j,k,1)=min(max(0.0_WP,this%SC(i,j,k,1)),this%Lmax**2)
+                  this%SC(i,j,k,4)=min(max(0.0_WP,this%SC(i,j,k,4)),this%Lmax**2)
+                  this%SC(i,j,k,6)=min(max(0.0_WP,this%SC(i,j,k,6)),this%Lmax**2)
+                  this%SC(i,j,k,2)=min(max(-this%Lmax**2,this%SC(i,j,k,2)),this%Lmax**2)
+                  this%SC(i,j,k,3)=min(max(-this%Lmax**2,this%SC(i,j,k,3)),this%Lmax**2)
+                  this%SC(i,j,k,5)=min(max(-this%Lmax**2,this%SC(i,j,k,5)),this%Lmax**2)
+                  ! Calculate forcing coefficient
+                  coeff=1.0_WP-(this%SC(i,j,k,1)+this%SC(i,j,k,4)+this%SC(i,j,k,6))/this%Lmax**2
+                  coeff=max(epsilon(1.0_WP),min(coeff,1.0_WP))*trelax      !< Build a safe adjusted relaxation time scale
+                  coeff=max(coeff,safety_margin*dt)                             !< Further clip based on current time step size for stability
+                  coeff=1.0_WP/coeff                                            !< Inverse coeff
+                  resSC(i,j,k,1)=resSC(i,j,k,1)-coeff*(this%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+                  resSC(i,j,k,2)=resSC(i,j,k,2)-coeff* this%SC(i,j,k,2)         !> xy tensor component
+                  resSC(i,j,k,3)=resSC(i,j,k,3)-coeff* this%SC(i,j,k,3)         !> xz tensor component
+                  resSC(i,j,k,4)=resSC(i,j,k,4)-coeff*(this%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+                  resSC(i,j,k,5)=resSC(i,j,k,5)-coeff* this%SC(i,j,k,5)         !> yz tensor component
+                  resSC(i,j,k,6)=resSC(i,j,k,6)-coeff*(this%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+               end do
+            end do
+         end do
+      case (oldroydb) ! Add relaxation source for Oldroyd-B (1/t_relax)(C-I)
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  trelax=trelaxfield(i,j,k)
+                  coeff=1.0_WP/trelax                                      !< Inverse of relaxation time
+                  resSC(i,j,k,1)=-coeff*(this%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+                  resSC(i,j,k,2)=-coeff*(this%SC(i,j,k,2)-0.0_WP) !> xy tensor component
+                  resSC(i,j,k,3)=-coeff*(this%SC(i,j,k,3)-0.0_WP) !> xz tensor component
+                  resSC(i,j,k,4)=-coeff*(this%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+                  resSC(i,j,k,5)=-coeff*(this%SC(i,j,k,5)-0.0_WP) !> yz tensor component
+                  resSC(i,j,k,6)=-coeff*(this%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+               end do
+            end do
+         end do
+      case (lptt) ! Add relaxation source term for lPTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  coeff=1.00_WP+(this%elongvisc/(1.0_WP-this%affinecoeff))*((this%SC(i,j,k,1)+this%SC(i,j,k,4)+this%SC(i,j,k,6))-3.0_WP)
+                  trelax=trelaxfield(i,j,k)
+                  coeff=coeff/trelax                   !< Divide by relaxation time scale
+                  resSC(i,j,k,1)=-coeff*(this%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+                  resSC(i,j,k,2)=-coeff*(this%SC(i,j,k,2)-0.0_WP) !> xy tensor component
+                  resSC(i,j,k,3)=-coeff*(this%SC(i,j,k,3)-0.0_WP) !> xz tensor component
+                  resSC(i,j,k,4)=-coeff*(this%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+                  resSC(i,j,k,5)=-coeff*(this%SC(i,j,k,5)-0.0_WP) !> yz tensor component
+                  resSC(i,j,k,6)=-coeff*(this%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+               end do
+            end do
+         end do
+      case (eptt) ! Add relaxation source term for ePTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle                              !< Skip non-solved cells
+                  coeff=exp(this%elongvisc/(1.0_WP-this%affinecoeff)*((this%SC(i,j,k,1)+this%SC(i,j,k,4)+this%SC(i,j,k,6))-3.0_WP))
+                  trelax=trelaxfield(i,j,k)
+                  coeff=coeff/trelax                   !< Divide by relaxation time scale
+                  resSC(i,j,k,1)=-coeff*(this%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+                  resSC(i,j,k,2)=-coeff*(this%SC(i,j,k,2)-0.0_WP) !> xy tensor component
+                  resSC(i,j,k,3)=-coeff*(this%SC(i,j,k,3)-0.0_WP) !> xz tensor component
+                  resSC(i,j,k,4)=-coeff*(this%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+                  resSC(i,j,k,5)=-coeff*(this%SC(i,j,k,5)-0.0_WP) !> yz tensor component
+                  resSC(i,j,k,6)=-coeff*(this%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+               end do
+            end do
+         end do
+      case default
+         call die('[tpviscoelastic get_relax] Unknown viscoelastic model selected')
+      end select
+   end subroutine get_relax_varyRelaxTime
+
    !> Add viscoelastic relaxation source using log-conformation stabilization 
    !> Assumes scalar being transported is ln(C)
    subroutine get_relax_log(this,resSC)
@@ -455,7 +601,207 @@ contains
       end select
    end subroutine get_relax_log
 
-      !> Calculate the eigenval and eigenvec of the conformation tensor in cells
+   !> Add viscoelastic relaxation source based on semi analtical integration
+   subroutine get_relax_analytical_varyRelxTime(this,trelaxfield,dt)
+      use messager, only: die
+      implicit none
+      class(viscoelastic), intent(inout) :: this
+      real(WP), intent(in) :: dt
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in) :: trelaxfield
+      integer :: i,j,k
+      real(WP) :: f,coeff,trelax
+      select case (this%model)
+      case (oldroydb) ! Add relaxation source for Oldroyd-B (1/t_relax)(C-I)
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  trelax = trelaxfield(i,j,k)
+                  coeff=-1.00_WP*(dt/trelax)  
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (fenep) ! FENE-P: relaxation (fC-I) with integration yielding C(t+dt)=C(t)*exp(-f dt/trelax)+(I/f)*(1-exp(-f dt/trelax))
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k) .ne. 0) cycle
+                  ! f = (Lmax^2-3)/(Lmax^2 - tr(C))
+                  f = (this%Lmax**2 - 3.0_WP) / (this%Lmax**2 - (this%SCrec(i,j,k,1) + this%SCrec(i,j,k,4) + this%SCrec(i,j,k,6)))
+                  trelax = trelaxfield(i,j,k)
+                  coeff = -1.00_WP*((f*dt)/trelax)
+                  this%SCrec(i,j,k,1) = this%SCrec(i,j,k,1)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,4) = this%SCrec(i,j,k,4)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,6) = this%SCrec(i,j,k,6)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,2) = this%SCrec(i,j,k,2)*exp(coeff)
+                  this%SCrec(i,j,k,3) = this%SCrec(i,j,k,3)*exp(coeff)
+                  this%SCrec(i,j,k,5) = this%SCrec(i,j,k,5)*exp(coeff)
+               end do
+            end do
+         end do
+      case (fenecr) ! Add relaxation source for fencer
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=this%Lmax**2/(this%Lmax**2-(this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6)))
+                  trelax=trelaxfield(i,j,k)
+                  coeff=-1.00_WP*((f*dt)/trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (lptt) ! Add relaxation source for lPTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=1.00_WP+(this%elongvisc/(1.0_WP-this%affinecoeff))*((this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6))-3.0_WP)
+                  trelax=trelaxfield(i,j,k)
+                  coeff=-1.00_WP*((f*dt)/trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (eptt) ! Add relaxation source for ePTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=exp(this%elongvisc/(1.0_WP-this%affinecoeff)*((this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6))-3.0_WP))
+                  trelax = trelaxfield(i,j,k)
+                  coeff=-1.00_WP*((f*dt)/trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case default
+         call die('[tpviscoelastic get_relax] Unknown viscoelastic model selected')
+      end select
+   end subroutine get_relax_analytical_varyRelxTime
+
+   !> Add viscoelastic relaxation source based on semi analtical integration
+   subroutine get_relax_analytical(this,dt)
+      use messager, only: die
+      implicit none
+      class(viscoelastic), intent(inout) :: this
+      real(WP), intent(in) :: dt
+      integer :: i,j,k
+      real(WP) :: f,coeff
+      select case (this%model)
+      case (oldroydb) ! Add relaxation source for Oldroyd-B (1/t_relax)(C-I)
+         coeff=-1.00_WP*(dt/this%trelax)  
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (fenep) ! FENE-P: relaxation (fC-I) with integration yielding C(t+dt)=C(t)*exp(-f dt/trelax)+(I/f)*(1-exp(-f dt/trelax))
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k) .ne. 0) cycle
+                  ! f = (Lmax^2-3)/(Lmax^2 - tr(C))
+                  f = (this%Lmax**2 - 3.0_WP) / (this%Lmax**2 - (this%SCrec(i,j,k,1) + this%SCrec(i,j,k,4) + this%SCrec(i,j,k,6)))
+                  coeff = -1.00_WP*((f*dt)/this%trelax)
+                  this%SCrec(i,j,k,1) = this%SCrec(i,j,k,1)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,4) = this%SCrec(i,j,k,4)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,6) = this%SCrec(i,j,k,6)*exp(coeff) + (1.0_WP/f)*(1.0_WP - exp(coeff))
+                  this%SCrec(i,j,k,2) = this%SCrec(i,j,k,2)*exp(coeff)
+                  this%SCrec(i,j,k,3) = this%SCrec(i,j,k,3)*exp(coeff)
+                  this%SCrec(i,j,k,5) = this%SCrec(i,j,k,5)*exp(coeff)
+               end do
+            end do
+         end do
+      case (fenecr) ! Add relaxation source for fencer
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=this%Lmax**2/(this%Lmax**2-(this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6)))
+                  coeff=-1.00_WP*((f*dt)/this%trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (lptt) ! Add relaxation source for lPTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=1.00_WP+(this%elongvisc/(1.0_WP-this%affinecoeff))*((this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6))-3.0_WP)
+                  coeff=-1.00_WP*((f*dt)/this%trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case (eptt) ! Add relaxation source for ePTT model
+         do k=this%cfg%kmino_,this%cfg%kmaxo_
+            do j=this%cfg%jmino_,this%cfg%jmaxo_
+               do i=this%cfg%imino_,this%cfg%imaxo_
+                  if (this%mask(i,j,k).ne.0) cycle
+                  f=0.0_WP; coeff=0.0_WP
+                  f=exp(this%elongvisc/(1.0_WP-this%affinecoeff)*((this%SCrec(i,j,k,1)+this%SCrec(i,j,k,4)+this%SCrec(i,j,k,6))-3.0_WP))
+                  coeff=-1.00_WP*((f*dt)/this%trelax)    
+                  this%SCrec(i,j,k,1)=this%SCrec(i,j,k,1)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< xx tensor component
+                  this%SCrec(i,j,k,2)=this%SCrec(i,j,k,2)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xy tensor component
+                  this%SCrec(i,j,k,3)=this%SCrec(i,j,k,3)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< xz tensor component
+                  this%SCrec(i,j,k,4)=this%SCrec(i,j,k,4)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< yy tensor component
+                  this%SCrec(i,j,k,5)=this%SCrec(i,j,k,5)*exp(coeff)+(1.00_WP-exp(coeff))*0.0_WP !< yz tensor component
+                  this%SCrec(i,j,k,6)=this%SCrec(i,j,k,6)*exp(coeff)+(1.00_WP-exp(coeff))*1.0_WP !< zz tensor component
+               end do
+            end do
+         end do
+      case default
+         call die('[tpviscoelastic get_relax] Unknown viscoelastic model selected')
+      end select
+   end subroutine get_relax_analytical
+
+   !> Calculate the eigenval and eigenvec of the conformation tensor in cells
    !> Assumes scalar being transported is ln(C)
    subroutine get_eigensystem(this)
       use mathtools, only: eigensolve3
@@ -476,10 +822,13 @@ contains
                   A(1,1)=this%SC(i,j,k,1); A(1,2)=this%SC(i,j,k,2); A(1,3)=this%SC(i,j,k,3)
                   A(2,1)=this%SC(i,j,k,2); A(2,2)=this%SC(i,j,k,4); A(2,3)=this%SC(i,j,k,5)
                   A(3,1)=this%SC(i,j,k,3); A(3,2)=this%SC(i,j,k,5); A(3,3)=this%SC(i,j,k,6)
+                  ! A(1,1)=limit(A(1,1)); A(1,2)=limit(A(1,2)); A(1,3)=limit(A(1,3))
+                  ! A(2,1)=limit(A(2,1)); A(2,2)=limit(A(2,2)); A(2,3)=limit(A(2,3))
+                  ! A(3,1)=limit(A(3,1)); A(3,2)=limit(A(3,2)); A(3,3)=limit(A(3,3))
                   ! Diagonalize it
-                  call eigensolve3(A,this%eigenvec(:,:,i,j,k),this%eigenval(:,i,j,k))
+                  call eigensolve3(A,this%eigenvec(:,:,i,j,k),this%eigenval_log(:,i,j,k))
                   ! Take the exponential
-                  this%eigenval(:,i,j,k)=exp(this%eigenval(:,i,j,k))
+                  this%eigenval(:,i,j,k)=exp(this%eigenval_log(:,i,j,k))
                else
                   this%eigenvec(:,:,i,j,k)=0.0_WP 
                   this%eigenval(:,i,j,k)=0.0_WP
@@ -512,7 +861,7 @@ contains
                ! Diagonalize it
                call eigensolve3(A,this%eigenvec(:,:,i,j,k),this%eigenval(:,i,j,k))
                ! Take the log
-               this%eigenval(:,i,j,k)=log(this%eigenval(:,i,j,k))
+               this%eigenval_log(:,i,j,k)=log(this%eigenval(:,i,j,k))
             end do
          end do
       end do
@@ -560,17 +909,17 @@ contains
                if (this%mask(i,j,k).ne.0) cycle
                ! Reconstruct conformation tensor (C=R*exp(ln(Lambda))*R^T={{Cxx,Cxy,Cxz},{Cxy,Cyy,Cyz},{Cxz,Cyz,Czz}})
                !>xx tensor component
-               this%SC(i,j,k,1)=this%eigenval(1,i,j,k)*this%eigenvec(1,1,i,j,k)**2                      +this%eigenval(2,i,j,k)*this%eigenvec(1,2,i,j,k)**2                      +this%eigenval(3,i,j,k)*this%eigenvec(1,3,i,j,k)**2
+               this%SC(i,j,k,1)=this%eigenval_log(1,i,j,k)*this%eigenvec(1,1,i,j,k)**2                      +this%eigenval_log(2,i,j,k)*this%eigenvec(1,2,i,j,k)**2                      +this%eigenval_log(3,i,j,k)*this%eigenvec(1,3,i,j,k)**2
                !>xy tensor component
-               this%SC(i,j,k,2)=this%eigenval(1,i,j,k)*this%eigenvec(1,1,i,j,k)*this%eigenvec(2,1,i,j,k)+this%eigenval(2,i,j,k)*this%eigenvec(1,2,i,j,k)*this%eigenvec(2,2,i,j,k)+this%eigenval(3,i,j,k)*this%eigenvec(1,3,i,j,k)*this%eigenvec(2,3,i,j,k)
+               this%SC(i,j,k,2)=this%eigenval_log(1,i,j,k)*this%eigenvec(1,1,i,j,k)*this%eigenvec(2,1,i,j,k)+this%eigenval_log(2,i,j,k)*this%eigenvec(1,2,i,j,k)*this%eigenvec(2,2,i,j,k)+this%eigenval_log(3,i,j,k)*this%eigenvec(1,3,i,j,k)*this%eigenvec(2,3,i,j,k)
                !>xz tensor component
-               this%SC(i,j,k,3)=this%eigenval(1,i,j,k)*this%eigenvec(1,1,i,j,k)*this%eigenvec(3,1,i,j,k)+this%eigenval(2,i,j,k)*this%eigenvec(1,2,i,j,k)*this%eigenvec(3,2,i,j,k)+this%eigenval(3,i,j,k)*this%eigenvec(1,3,i,j,k)*this%eigenvec(3,3,i,j,k)
+               this%SC(i,j,k,3)=this%eigenval_log(1,i,j,k)*this%eigenvec(1,1,i,j,k)*this%eigenvec(3,1,i,j,k)+this%eigenval_log(2,i,j,k)*this%eigenvec(1,2,i,j,k)*this%eigenvec(3,2,i,j,k)+this%eigenval_log(3,i,j,k)*this%eigenvec(1,3,i,j,k)*this%eigenvec(3,3,i,j,k)
                !>yy tensor component
-               this%SC(i,j,k,4)=this%eigenval(1,i,j,k)*this%eigenvec(2,1,i,j,k)**2                      +this%eigenval(2,i,j,k)*this%eigenvec(2,2,i,j,k)**2                      +this%eigenval(3,i,j,k)*this%eigenvec(2,3,i,j,k)**2
+               this%SC(i,j,k,4)=this%eigenval_log(1,i,j,k)*this%eigenvec(2,1,i,j,k)**2                      +this%eigenval_log(2,i,j,k)*this%eigenvec(2,2,i,j,k)**2                      +this%eigenval_log(3,i,j,k)*this%eigenvec(2,3,i,j,k)**2
                !>yz tensor component
-               this%SC(i,j,k,5)=this%eigenval(1,i,j,k)*this%eigenvec(2,1,i,j,k)*this%eigenvec(3,1,i,j,k)+this%eigenval(2,i,j,k)*this%eigenvec(2,2,i,j,k)*this%eigenvec(3,2,i,j,k)+this%eigenval(3,i,j,k)*this%eigenvec(2,3,i,j,k)*this%eigenvec(3,3,i,j,k)
+               this%SC(i,j,k,5)=this%eigenval_log(1,i,j,k)*this%eigenvec(2,1,i,j,k)*this%eigenvec(3,1,i,j,k)+this%eigenval_log(2,i,j,k)*this%eigenvec(2,2,i,j,k)*this%eigenvec(3,2,i,j,k)+this%eigenval_log(3,i,j,k)*this%eigenvec(2,3,i,j,k)*this%eigenvec(3,3,i,j,k)
                !>zz tensor component
-               this%SC(i,j,k,6)=this%eigenval(1,i,j,k)*this%eigenvec(3,1,i,j,k)**2                      +this%eigenval(2,i,j,k)*this%eigenvec(3,2,i,j,k)**2                      +this%eigenval(3,i,j,k)*this%eigenvec(3,3,i,j,k)**2
+               this%SC(i,j,k,6)=this%eigenval_log(1,i,j,k)*this%eigenvec(3,1,i,j,k)**2                      +this%eigenval_log(2,i,j,k)*this%eigenvec(3,2,i,j,k)**2                      +this%eigenval_log(3,i,j,k)*this%eigenvec(3,3,i,j,k)**2
             end do
          end do
       end do
