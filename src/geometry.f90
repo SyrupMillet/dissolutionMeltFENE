@@ -8,11 +8,7 @@ module geometry
    !> Single config
    type(config), public :: cfg
 
-   !> Mesh info
-   integer :: nx
-   real(WP) :: Lx
-
-   public :: geometry_init,nx,Lx
+   public :: geometry_init
 
 contains
 
@@ -48,7 +44,7 @@ contains
          end do
 
          ! General serial grid object
-         grid=sgrid(coord=cartesian,no=3,x=x,y=y,z=z,xper=.true.,yper=.true.,zper=.true.,name='box')
+         grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.true.,zper=.true.,name='box')
 
       end block create_grid
 

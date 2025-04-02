@@ -54,6 +54,11 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: gradUxx
 
    real(WP) :: diff0, ad
+   real(WP) :: shearVel
+
+   real(WP), dimension(:,:,:), allocatable:: MixViscosity
+   real(WP) :: maxMixViscosity
+   real(WP) :: maxRelaxTime, minRelaxTime
 
    real(WP) :: threshold = 1.0E-5_WP
 
@@ -263,7 +268,7 @@ contains
    subroutine getRelaxTime
       integer :: i,j,k
       real(WP) :: phi2
-      relaxTime =ve%trelax
+      relaxTime = ve%trelax
       do k=cfg%kmino_,cfg%kmaxo_
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
@@ -274,6 +279,56 @@ contains
       end do
       call cfg%sync(relaxTime)
    end subroutine getRelaxTime
+
+   subroutine getMixViscosity
+      integer :: i,j,k
+      real(WP) :: phi2, tau, tauRatio
+      do k=cfg%kmino_,cfg%kmaxo_
+         do j=cfg%jmino_,cfg%jmaxo_
+            do i=cfg%imino_,cfg%imaxo_
+               phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
+               tau = relaxTime(i,j,k)
+               tauRatio = (tau-minRelaxTime)/(maxRelaxTime-minRelaxTime)
+               tauRatio = max(0.0_WP,min(1.0_WP,tauRatio))
+               MixViscosity(i,j,k) = maxMixViscosity*phi2*tauRatio
+            end do
+         end do
+      end do
+      call cfg%sync(relaxTime)
+   end subroutine getMixViscosity
+
+   !> Function that localizes the left (x-) of the domain
+   function left_of_domain(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (i.eq.pg%imin) isIn=.true.
+   end function left_of_domain
+
+   !> Function that localizes the left (x-) of the domain for scalar
+   function left_of_domainsc(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (i.eq.pg%imin-1) isIn=.true.
+   end function left_of_domainsc
+
+   !> Function that localizes the right (x+) of the domain
+   function right_of_domain(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (i.eq.pg%imax+1) isIn=.true.
+   end function right_of_domain
 
    !> Initialization of problem solver
    subroutine simulation_init
@@ -295,9 +350,12 @@ contains
       create_flow_solver: block
          use hypre_uns_class, only: gmres_amg
          use hypre_str_class, only: pcg_pfmg
-         use lowmach_class,   only: dirichlet,clipped_neumann
+         use lowmach_class,   only: dirichlet,clipped_neumann, neumann
          ! Create flow solver
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
+         ! Define bc
+         call fs%add_bcond(name='leftwall',type=dirichlet      ,locator=left_of_domain ,face='x',dir=-1,canCorrect=.false.)
+         call fs%add_bcond(name='rightwall',type=dirichlet,locator=right_of_domain,face='x',dir=+1,canCorrect=.false.)
          ! Assign constant viscosity
          call param_read('Dynamic viscosity',visc); fs%visc=visc
          ! Assign constant density
@@ -319,6 +377,9 @@ contains
          use vdscalar_class, only: dirichlet,neumann,upwind,bquick
          ! Create volume fraction scalar solver
          vf=vdscalar(cfg=cfg,scheme=bquick,name='Volume fraction')
+         ! Define bc
+         call vf%add_bcond(name='leftwall',type=neumann      ,locator=left_of_domainsc,dir='x-')
+         call vf%add_bcond(name='rightwall',type=dirichlet,   locator=right_of_domain,dir='x+')
          ! Configure implicit scalar solver
          vfs = ddadi(cfg=cfg,name='Volume fraction',nst=13)
          ! Setup the solver
@@ -327,11 +388,14 @@ contains
 
       ! Create a viscoelastic solver
       create_viscoelastic: block
-         use multiscalar_class,   only: bquick, upwind
+         use multiscalar_class,   only: bquick, upwind, neumann, dirichlet
          use viscoelastic_class,  only: oldroydb, fenep
          integer :: i,j,k
          ! Create FENE model solver
          call ve%init(cfg=cfg,model=fenep,scheme=upwind,name='FENE')
+         ! Define bc
+         call vf%add_bcond(name='leftwall',type=neumann      ,locator=left_of_domainsc,dir='x-')
+         call vf%add_bcond(name='rightwall',type=dirichlet,   locator=right_of_domain,dir='x+')
          ! Maximum extensibility of polymer chain
          call param_read('Maximum polymer extensibility',ve%Lmax)
          ! Relaxation time for polymer
@@ -344,30 +408,18 @@ contains
          call ve%setup(implicit_solver=ves)
          ! call ve%setup()
 
-         ! Check first if we use stabilization
-         call param_read('Stabilization',stabilization,default=.true.)
-
-         if (stabilization) then
-            !> Allocate storage fo eigenvalues and vectors
-            allocate(ve%eigenval    (1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval=0.0_WP
-            allocate(ve%eigenvec(1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenvec=0.0_WP
-            allocate(ve%eigenval_log(1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval_log=0.0_WP
-            !> Allocate storage for reconstructured C
-            allocate(ve%SCrec   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6)); ve%SCrec=0.0_WP
-            do k=cfg%kmino_,cfg%kmaxo_
-               do j=cfg%jmino_,cfg%jmaxo_
-                  do i=cfg%imino_,cfg%imaxo_
-                     ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
-                     ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
-                     ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
-                  end do
-               end do
-            end do
-            ! Get eigenvalues and eigenvectors
-            call ve%get_eigensystem()
-         end if
-
       end block create_viscoelastic
+
+      prepareMixViscosity: block
+         use param, only: param_read
+         ! Read the maximum viscosity
+         call param_read('Max Mixture viscosity',maxMixViscosity)
+
+         ! calculate the relaxation time
+         minRelaxTime = ve%trelax
+         maxRelaxTime = ve%trelax*101.0_WP
+
+      end block prepareMixViscosity
 
 
       ! Allocate work arrays
@@ -408,20 +460,37 @@ contains
 
          allocate(gradUxx(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
+         allocate(MixViscosity(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+
       end block allocate_work_arrays
 
       ! Initialize our velocity field
       initialize_velocity: block
          use lowmach_class, only: bcond
+         type(bcond), pointer :: mybc
          integer :: n,i,j,k
-
          ! Zero initial field
          fs%U=0.0_WP; fs%V=0.0_WP; fs%W=0.0_WP
 
+         ! Apply all other boundary conditions
+         ! Read the shear velocity
+         call param_read('Shear velocity',shearVel)
+         call fs%get_bcond('leftwall',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
+            fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
+         end do
+         call fs%get_bcond('rightwall',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
+            fs%V(i,j,k) = shearVel ; fs%rhoV(i,j,k) = rho*shearVel
+         end do
+         call fs%apply_bcond(time%t,time%dt)
+
          ! Form momentum
          call fs%rho_multiply()
-         ! Apply all other boundary conditions
-         call fs%apply_bcond(time%t,time%dt)
          call fs%interp_vel(Ui,Vi,Wi)
          ! Here it should be changed to use mvdscalar
          resRHO=0.0_WP
@@ -432,6 +501,8 @@ contains
 
       initialize_volume_fraction: block
          use param, only: param_read
+         use vdscalar_class, only: bcond
+         type(bcond), pointer :: mybc
          real(WP) :: diameter, diff, distace
          real(WP) :: x1, y1, z1, x2, y2, z2
          integer :: i,j,k,n
@@ -440,33 +511,88 @@ contains
          ! Initialize volume fraction
          call param_read('polymer diameter',diameter)
 
+         ! vf%SC = 0.0_WP
+         ! do k=cfg%kmino_,cfg%kmaxo_
+         !    do j=cfg%jmino_,cfg%jmaxo_
+         !       do i=cfg%imino_,cfg%imaxo_
+         !          x1 = cfg%x(i); y1 = cfg%y(j); z1 = cfg%z(k)
+         !          x2 = cfg%x(i+1); y2 = cfg%y(j+1); z2 = cfg%z(k+1)
+         !          vertices(1,:) = [x1,y1,z1] ; vertices(2,:) = [x2,y1,z1] ; vertices(3,:) = [x2,y2,z1] ; vertices(4,:) = [x1,y2,z1]
+         !          vertices(5,:) = [x1,y1,z2] ; vertices(6,:) = [x2,y1,z2] ; vertices(7,:) = [x2,y2,z2] ; vertices(8,:) = [x1,y2,z2]
+         !          isInside = 0.0_WP
+         !          do n=1,8
+         !             distace = (vertices(n,1))**2+(vertices(n,2))**2+(vertices(n,3))**2
+         !             if (distace .le. (diameter/2.0_WP)**2) isInside(n) = 1.0_WP
+         !          end do
+         !          vf%SC(i,j,k) = min(sum(isInside)/8.0_WP,1.0_WP)
+         !       end do
+         !    end do
+         ! end do
          vf%SC = 0.0_WP
          do k=cfg%kmino_,cfg%kmaxo_
             do j=cfg%jmino_,cfg%jmaxo_
                do i=cfg%imino_,cfg%imaxo_
-                  x1 = cfg%x(i); y1 = cfg%y(j); z1 = cfg%z(k)
-                  x2 = cfg%x(i+1); y2 = cfg%y(j+1); z2 = cfg%z(k+1)
-                  vertices(1,:) = [x1,y1,z1] ; vertices(2,:) = [x2,y1,z1] ; vertices(3,:) = [x2,y2,z1] ; vertices(4,:) = [x1,y2,z1]
-                  vertices(5,:) = [x1,y1,z2] ; vertices(6,:) = [x2,y1,z2] ; vertices(7,:) = [x2,y2,z2] ; vertices(8,:) = [x1,y2,z2]
-                  isInside = 0.0_WP
-                  do n=1,8
-                     distace = (vertices(n,1))**2+(vertices(n,2))**2+(vertices(n,3))**2
-                     if (distace .le. (diameter/2.0_WP)**2) isInside(n) = 1.0_WP
-                  end do
-                  vf%SC(i,j,k) = min(sum(isInside)/8.0_WP,1.0_WP)
+                  x1 = cfg%xm(i)
+                  if (x1.lt.0.0_WP) vf%SC(i,j,k) = 1.0_WP
                end do
             end do
          end do
 
          ! read diffusivity
-         ! call param_read('diffusion coefficient',diff)
-         ! vf%diff = diff
          vf%rho = rho
          call param_read('diffusion coefficient 0',diff0)
          call param_read('scaling factor',ad)
          call getDiffutionCoeff()
 
+         ! Apply all other boundary conditions
+         call vf%get_bcond('rightwall',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            vf%SC(i,j,k) = 0.0_WP
+         end do
+         call vf%apply_bcond(time%t,time%dt)
+
       end block initialize_volume_fraction
+
+      ! Initialize viscoelastic solver
+      initialize_viscoelastic: block
+         use param, only: param_read
+         use multiscalar_class, only: bcond
+         type(bcond), pointer :: mybc
+         integer :: n,i,j,k
+         ! Check first if we use stabilization
+         call param_read('Stabilization',stabilization,default=.true.)
+
+         if (stabilization) then
+            !> Allocate storage fo eigenvalues and vectors
+            allocate(ve%eigenval    (1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval=0.0_WP
+            allocate(ve%eigenvec(1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenvec=0.0_WP
+            allocate(ve%eigenval_log(1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval_log=0.0_WP
+            !> Allocate storage for reconstructured C
+            allocate(ve%SCrec   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6)); ve%SCrec=0.0_WP
+            do k=cfg%kmino_,cfg%kmaxo_
+               do j=cfg%jmino_,cfg%jmaxo_
+                  do i=cfg%imino_,cfg%imaxo_
+                     ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
+                     ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
+                     ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
+                  end do
+               end do
+            end do
+            ! ! Apply all other boundary conditions
+            ! call ve%get_bcond('rightwall',mybc)
+            ! do n=1,mybc%itr%no_
+            !    i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            !    ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
+            !    ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
+            !    ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
+            ! end do
+            ! call ve%apply_bcond(time%t,time%dt)
+            ! Get eigenvalues and eigenvectors
+            call ve%get_eigensystem()
+         end if
+
+      end block initialize_viscoelastic
 
       ! Add Ensight output
       create_ensight: block
@@ -482,6 +608,7 @@ contains
          call ens_out%add_vector('SolventDiffVelo',SdiffUi,SdiffVi,SdiffWi)
          call ens_out%add_scalar('pressure',fs%P)
          call ens_out%add_scalar('diffusivity',vf%diff)
+         call ens_out%add_scalar('MixViscosity',MixViscosity)
          ! call ens_out%add_scalar('divergence',fs%div)
          call ens_out%add_scalar('volumefraction',vf%SC)
          call ens_out%add_scalar('gradUxx',gradUxx)
@@ -686,6 +813,20 @@ contains
             ! Apply these residuals
             vf%SC = 2.0_WP*vf%SC - vf%SCold + resVF
 
+            ! Apply boundary conditions
+            vf_bc : block
+               use vdscalar_class, only: bcond
+               type(bcond), pointer :: mybc
+               integer :: n,i,j,k
+               ! Apply all other boundary conditions
+               call vf%get_bcond('rightwall',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  vf%SC(i,j,k) = 0.0_WP
+               end do
+               call vf%apply_bcond(time%t,time%dt)
+            end block vf_bc
+            
             ! ===================== Velocity Solver =======================
 
             ! Explicit calculation of drho*u/dt from NS
@@ -703,6 +844,11 @@ contains
                integer :: i,j,k,n
                real(WP), dimension(:,:,:), allocatable :: Txy,Tyz,Tzx
                real(WP) :: coeff
+               real(WP) :: mixvisc
+
+               ! Get the viscosity of the mixture
+               call getMixViscosity()
+
                ! Allocate work arrays
                allocate(Txy   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
                allocate(Tyz   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -711,9 +857,20 @@ contains
                select case (ve%model)
                 case (fenep, oldroydb)
                   call ve%get_relax_varyRelaxTime(relaxTime,stress,time%dt)
-                  do n=1,6
-                     stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
+                  do k=cfg%kmino_,cfg%kmaxo_
+                     do j=cfg%jmino_,cfg%jmaxo_
+                        do i=cfg%imino_,cfg%imaxo_
+                           if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
+                           mixvisc = MixViscosity(i,j,k)
+                           do n=1,6
+                              stress(i,j,k,n)=-mixvisc*stress(i,j,k,n)
+                           end do
+                        end do
+                     end do
                   end do
+                  ! do n=1,6
+                  !    stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
+                  ! end do
                 case (eptt,lptt)
                   stress=0.0_WP
                   coeff=ve%visc_p/(ve%trelax*(1-ve%affinecoeff))
@@ -775,6 +932,25 @@ contains
             ! Apply other boundary conditions and update momentum
             call fs%rho_multiply()
 
+            fs_bc : block
+               use lowmach_class, only: bcond
+               type(bcond), pointer :: mybc
+               integer :: n,i,j,k
+               ! Apply all other boundary conditions
+               call fs%get_bcond('leftwall',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
+                  fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
+               end do
+               call fs%get_bcond('rightwall',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
+                  fs%V(i,j,k) = shearVel ; fs%rhoV(i,j,k) = rho*shearVel
+               end do
+               call fs%apply_bcond(time%t,time%dt)
+            end block fs_bc
 
             ! Solve Poisson equation
             call fs%get_div(drhodt=resRHO)
