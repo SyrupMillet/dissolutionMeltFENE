@@ -54,7 +54,7 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: gradUxx
 
    real(WP) :: diff0, ad
-   real(WP) :: shearVel
+   real(WP) :: inflowVelocity
 
    real(WP), dimension(:,:,:), allocatable:: MixViscosity
    real(WP) :: maxMixViscosity
@@ -243,12 +243,6 @@ contains
       deallocate(dudy,dudz,dvdx,dvdz,dwdx,dwdy)
    end subroutine applyExtraGradU
 
-   subroutine getDiffMax
-      maxSdiffU = maxval(SdiffU) ; minSdiffU = minval(SdiffU)
-      maxSdiffV = maxval(SdiffV) ; minSdiffV = minval(SdiffV)
-      maxSdiffW = maxval(SdiffW) ; minSdiffW = minval(SdiffW)
-   end subroutine getDiffMax
-
    subroutine getDiffutionCoeff
       integer :: i,j,k
       real(WP) :: diff, phi1
@@ -330,6 +324,39 @@ contains
       if (i.eq.pg%imax+1) isIn=.true.
    end function right_of_domain
 
+   !> Function that localizes the bottom (y-) of the domain
+   function bottom_of_domain(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (j.eq.pg%jmin) isIn=.true.
+   end function bottom_of_domain
+
+   !> Function that localizes the bottom (y-) of the domain for scalar
+   function bottom_of_domainsc(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (j.eq.pg%jmin-1) isIn=.true.
+   end function bottom_of_domainsc
+
+   !> Function that localizes the top (y+) of the domain
+   function top_of_domain(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (j.eq.pg%jmax+1) isIn=.true.
+   end function top_of_domain
+
    !> Initialization of problem solver
    subroutine simulation_init
       use param, only: param_read
@@ -350,12 +377,14 @@ contains
       create_flow_solver: block
          use hypre_uns_class, only: gmres_amg
          use hypre_str_class, only: pcg_pfmg
-         use lowmach_class,   only: dirichlet,clipped_neumann, neumann
+         use lowmach_class,   only: dirichlet,clipped_neumann, neumann, slip
          ! Create flow solver
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
          ! Define bc
-         call fs%add_bcond(name='leftwall',type=dirichlet      ,locator=left_of_domain ,face='x',dir=-1,canCorrect=.false.)
-         call fs%add_bcond(name='rightwall',type=dirichlet,locator=right_of_domain,face='x',dir=+1,canCorrect=.false.)
+         call fs%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domain ,face='x',dir=-1,canCorrect=.false.)
+         call fs%add_bcond(name='outflow',type=clipped_neumann,   locator=right_of_domain,face='x',dir=+1,canCorrect=.true.)
+         call fs%add_bcond(name='topfreebd',type=slip      ,locator=top_of_domain,face='y',dir=+1,canCorrect=.false.)
+         call fs%add_bcond(name='bottom',type=dirichlet      ,locator=bottom_of_domainsc,face='y',dir=-1,canCorrect=.false.)
          ! Assign constant viscosity
          call param_read('Dynamic viscosity',visc); fs%visc=visc
          ! Assign constant density
@@ -378,8 +407,8 @@ contains
          ! Create volume fraction scalar solver
          vf=vdscalar(cfg=cfg,scheme=bquick,name='Volume fraction')
          ! Define bc
-         call vf%add_bcond(name='leftwall',type=neumann      ,locator=left_of_domainsc,dir='x-')
-         call vf%add_bcond(name='rightwall',type=dirichlet,   locator=right_of_domain,dir='x+')
+         call vf%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domainsc,dir='x-')
+         call vf%add_bcond(name='bottom',type=dirichlet      ,locator=bottom_of_domainsc,dir='y-')
          ! Configure implicit scalar solver
          vfs = ddadi(cfg=cfg,name='Volume fraction',nst=13)
          ! Setup the solver
@@ -407,7 +436,6 @@ contains
          ! Setup the solver
          call ve%setup(implicit_solver=ves)
          ! call ve%setup()
-
       end block create_viscoelastic
 
       prepareMixViscosity: block
@@ -471,26 +499,27 @@ contains
          integer :: n,i,j,k
          ! Zero initial field
          fs%U=0.0_WP; fs%V=0.0_WP; fs%W=0.0_WP
+         ! Form momentum
+         call fs%rho_multiply()
+
 
          ! Apply all other boundary conditions
          ! Read the shear velocity
-         call param_read('Shear velocity',shearVel)
-         call fs%get_bcond('leftwall',mybc)
+         call param_read('inflow velocity',inflowVelocity)
+         call fs%apply_bcond(time%t,time%dt)
+         call fs%get_bcond('inflow',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            fs%U(i,j,k) = inflowVelocity ; fs%rhoU(i,j,k) = rho*inflowVelocity
+         end do
+         call fs%get_bcond('bottom',mybc)
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
             fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
          end do
-         call fs%get_bcond('rightwall',mybc)
-         do n=1,mybc%itr%no_
-            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-            fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
-            fs%V(i,j,k) = shearVel ; fs%rhoV(i,j,k) = rho*shearVel
-         end do
-         call fs%apply_bcond(time%t,time%dt)
 
-         ! Form momentum
-         call fs%rho_multiply()
+
          call fs%interp_vel(Ui,Vi,Wi)
          ! Here it should be changed to use mvdscalar
          resRHO=0.0_WP
@@ -503,40 +532,9 @@ contains
          use param, only: param_read
          use vdscalar_class, only: bcond
          type(bcond), pointer :: mybc
-         real(WP) :: diameter, diff, distace
-         real(WP) :: x1, y1, z1, x2, y2, z2
          integer :: i,j,k,n
-         real(WP), dimension(8,3) :: vertices
-         real(WP), dimension(8) :: isInside
-         ! Initialize volume fraction
-         call param_read('polymer diameter',diameter)
 
-         ! vf%SC = 0.0_WP
-         ! do k=cfg%kmino_,cfg%kmaxo_
-         !    do j=cfg%jmino_,cfg%jmaxo_
-         !       do i=cfg%imino_,cfg%imaxo_
-         !          x1 = cfg%x(i); y1 = cfg%y(j); z1 = cfg%z(k)
-         !          x2 = cfg%x(i+1); y2 = cfg%y(j+1); z2 = cfg%z(k+1)
-         !          vertices(1,:) = [x1,y1,z1] ; vertices(2,:) = [x2,y1,z1] ; vertices(3,:) = [x2,y2,z1] ; vertices(4,:) = [x1,y2,z1]
-         !          vertices(5,:) = [x1,y1,z2] ; vertices(6,:) = [x2,y1,z2] ; vertices(7,:) = [x2,y2,z2] ; vertices(8,:) = [x1,y2,z2]
-         !          isInside = 0.0_WP
-         !          do n=1,8
-         !             distace = (vertices(n,1))**2+(vertices(n,2))**2+(vertices(n,3))**2
-         !             if (distace .le. (diameter/2.0_WP)**2) isInside(n) = 1.0_WP
-         !          end do
-         !          vf%SC(i,j,k) = min(sum(isInside)/8.0_WP,1.0_WP)
-         !       end do
-         !    end do
-         ! end do
-         vf%SC = 0.0_WP
-         do k=cfg%kmino_,cfg%kmaxo_
-            do j=cfg%jmino_,cfg%jmaxo_
-               do i=cfg%imino_,cfg%imaxo_
-                  x1 = cfg%xm(i)
-                  if (x1.lt.0.0_WP) vf%SC(i,j,k) = 1.0_WP
-               end do
-            end do
-         end do
+         vf%SC=0.0_WP
 
          ! read diffusivity
          vf%rho = rho
@@ -545,7 +543,12 @@ contains
          call getDiffutionCoeff()
 
          ! Apply all other boundary conditions
-         call vf%get_bcond('rightwall',mybc)
+         call vf%get_bcond('inflow',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            vf%SC(i,j,k) = 0.0_WP
+         end do
+         call vf%get_bcond('bottom',mybc)
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             vf%SC(i,j,k) = 0.0_WP
@@ -598,25 +601,25 @@ contains
       create_ensight: block
          integer :: i, nsc
          ! Create Ensight output from cfg
-         ens_out=ensight(cfg=cfg,name='DiffusionDrop')
+         ens_out=ensight(cfg=cfg,name='viscoela_flat_plate')
          ! Create event for Ensight output
          ens_evt=event(time=time,name='Ensight output')
          call param_read('Ensight output period',ens_evt%tper)
          ! Add variables to output
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
-         call ens_out%add_vector('PolymerDiffVelo',PdiffUi,PdiffVi,PdiffWi)
-         call ens_out%add_vector('SolventDiffVelo',SdiffUi,SdiffVi,SdiffWi)
+         !call ens_out%add_vector('PolymerDiffVelo',PdiffUi,PdiffVi,PdiffWi)
+         !call ens_out%add_vector('SolventDiffVelo',SdiffUi,SdiffVi,SdiffWi)
          call ens_out%add_scalar('pressure',fs%P)
-         call ens_out%add_scalar('diffusivity',vf%diff)
+         !call ens_out%add_scalar('diffusivity',vf%diff)
          call ens_out%add_scalar('MixViscosity',MixViscosity)
-         ! call ens_out%add_scalar('divergence',fs%div)
-         call ens_out%add_scalar('volumefraction',vf%SC)
-         call ens_out%add_scalar('gradUxx',gradUxx)
-         call ens_out%add_scalar('relaxTime',relaxTime)
-         call ens_out%add_vector("eigenvalues",ve%eigenval(1,:,:,:),ve%eigenval(2,:,:,:),ve%eigenval(3,:,:,:))
+         call ens_out%add_scalar('divergence',fs%div)
+         !call ens_out%add_scalar('volumefraction',vf%SC)
+         !call ens_out%add_scalar('gradUxx',gradUxx)
+         !call ens_out%add_scalar('relaxTime',relaxTime)
+         !call ens_out%add_vector("eigenvalues",ve%eigenval(1,:,:,:),ve%eigenval(2,:,:,:),ve%eigenval(3,:,:,:))
          ! call ens_out%add_vector("logeigenvalues",ve%eigenval_log(1,:,:,:),ve%eigenval_log(2,:,:,:),ve%eigenval_log(3,:,:,:))
          do nsc=1,ve%nscalar
-            call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SCrec(:,:,:,nsc))
+            !call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SCrec(:,:,:,nsc))
             ! call ens_out%add_scalar('ln'//trim(ve%SCname(nsc)),ve%SC(:,:,:,nsc))
             ! call ens_out%add_scalar('sctmp'//trim(ve%SCname(nsc)),SCtmp(:,:,:,nsc))
          end do
@@ -630,7 +633,6 @@ contains
          call fs%get_cfl(time%dt,time%cfl)
          call fs%get_max()
          call vf%get_max()
-         call getDiffMax()
          if (stabilization) then
             call ve%get_max_reconstructed()
          end if
@@ -674,12 +676,6 @@ contains
          Difffile=monitor(vf%cfg%amRoot,'Diffusion')
          call Difffile%add_column(time%n,'Timestep number')
          call Difffile%add_column(time%t,'Time')
-         call Difffile%add_column(maxSdiffU,'maxSdiffU')
-         call Difffile%add_column(maxSdiffV,'maxSdiffV')
-         call Difffile%add_column(maxSdiffW,'maxSdiffW')
-         call Difffile%add_column(minSdiffU,'minSdiffU')
-         call Difffile%add_column(minSdiffV,'minSdiffV')
-         call Difffile%add_column(minSdiffW,'minSdiffW')
          call Difffile%write()
       end block create_monitor
 
@@ -819,14 +815,19 @@ contains
                type(bcond), pointer :: mybc
                integer :: n,i,j,k
                ! Apply all other boundary conditions
-               call vf%get_bcond('rightwall',mybc)
+               call vf%get_bcond('inflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  vf%SC(i,j,k) = 0.0_WP
+               end do
+               call vf%get_bcond('bottom',mybc)
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
                   vf%SC(i,j,k) = 0.0_WP
                end do
                call vf%apply_bcond(time%t,time%dt)
             end block vf_bc
-            
+
             ! ===================== Velocity Solver =======================
 
             ! Explicit calculation of drho*u/dt from NS
@@ -838,87 +839,87 @@ contains
             resW=time%dtmid*resW-(2.0_WP*fs%rhoW-2.0_WP*fs%rhoWold)
 
 
-            ! ! Add polymer stress term
-            polymer_stress: block
-               use viscoelastic_class, only: fenep,lptt,eptt, oldroydb
-               integer :: i,j,k,n
-               real(WP), dimension(:,:,:), allocatable :: Txy,Tyz,Tzx
-               real(WP) :: coeff
-               real(WP) :: mixvisc
+            ! ! ! Add polymer stress term
+            ! polymer_stress: block
+            !    use viscoelastic_class, only: fenep,lptt,eptt, oldroydb
+            !    integer :: i,j,k,n
+            !    real(WP), dimension(:,:,:), allocatable :: Txy,Tyz,Tzx
+            !    real(WP) :: coeff
+            !    real(WP) :: mixvisc
 
-               ! Get the viscosity of the mixture
-               call getMixViscosity()
+            !    ! Get the viscosity of the mixture
+            !    call getMixViscosity()
 
-               ! Allocate work arrays
-               allocate(Txy   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-               allocate(Tyz   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-               allocate(Tzx   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-               ! Build liquid stress tensor
-               select case (ve%model)
-                case (fenep, oldroydb)
-                  call ve%get_relax_varyRelaxTime(relaxTime,stress,time%dt)
-                  do k=cfg%kmino_,cfg%kmaxo_
-                     do j=cfg%jmino_,cfg%jmaxo_
-                        do i=cfg%imino_,cfg%imaxo_
-                           if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
-                           mixvisc = MixViscosity(i,j,k)
-                           do n=1,6
-                              stress(i,j,k,n)=-mixvisc*stress(i,j,k,n)
-                           end do
-                        end do
-                     end do
-                  end do
-                  ! do n=1,6
-                  !    stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
-                  ! end do
-                case (eptt,lptt)
-                  stress=0.0_WP
-                  coeff=ve%visc_p/(ve%trelax*(1-ve%affinecoeff))
-                  do n=1,6
-                     do k=cfg%kmino_,cfg%kmaxo_
-                        do j=cfg%jmino_,cfg%jmaxo_
-                           do i=cfg%imino_,cfg%imaxo_
-                              if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
-                              stress(i,j,k,1)=coeff*(ve%SC(i,j,k,1)-1.0_WP) !> xx tensor component
-                              stress(i,j,k,2)=coeff*(ve%SC(i,j,k,2)-0.0_WP) !> xy tensor component
-                              stress(i,j,k,3)=coeff*(ve%SC(i,j,k,3)-0.0_WP) !> xz tensor component
-                              stress(i,j,k,4)=coeff*(ve%SC(i,j,k,4)-1.0_WP) !> yy tensor component
-                              stress(i,j,k,5)=coeff*(ve%SC(i,j,k,5)-0.0_WP) !> yz tensor component
-                              stress(i,j,k,6)=coeff*(ve%SC(i,j,k,6)-1.0_WP) !> zz tensor component
-                           end do
-                        end do
-                     end do
-                  end do
-               end select
-               ! Interpolate tensor components to cell edges
-               do k=cfg%kmin_,cfg%kmax_+1
-                  do j=cfg%jmin_,cfg%jmax_+1
-                     do i=cfg%imin_,cfg%imax_+1
-                        Txy(i,j,k)=sum(fs%itp_xy(:,:,i,j,k)*stress(i-1:i,j-1:j,k,2))
-                        Tyz(i,j,k)=sum(fs%itp_yz(:,:,i,j,k)*stress(i,j-1:j,k-1:k,5))
-                        Tzx(i,j,k)=sum(fs%itp_xz(:,:,i,j,k)*stress(i-1:i,j,k-1:k,3))
-                     end do
-                  end do
-               end do
-               ! Add divergence of stress to residual
-               do k=fs%cfg%kmin_,fs%cfg%kmax_
-                  do j=fs%cfg%jmin_,fs%cfg%jmax_
-                     do i=fs%cfg%imin_,fs%cfg%imax_
-                        if (fs%umask(i,j,k).eq.0) resU(i,j,k)=resU(i,j,k)+(sum(fs%divu_x(:,i,j,k)*stress(i-1:i,j,k,1))&
-                        &                                                 +sum(fs%divu_y(:,i,j,k)*Txy(i,j:j+1,k))     &
-                        &                                                 +sum(fs%divu_z(:,i,j,k)*Tzx(i,j,k:k+1)))*time%dt
-                        if (fs%vmask(i,j,k).eq.0) resV(i,j,k)=resV(i,j,k)+(sum(fs%divv_x(:,i,j,k)*Txy(i:i+1,j,k))     &
-                        &                                                 +sum(fs%divv_y(:,i,j,k)*stress(i,j-1:j,k,4))&
-                        &                                                 +sum(fs%divv_z(:,i,j,k)*Tyz(i,j,k:k+1)))*time%dt
-                        if (fs%wmask(i,j,k).eq.0) resW(i,j,k)=resW(i,j,k)+(sum(fs%divw_x(:,i,j,k)*Tzx(i:i+1,j,k))     &
-                        &                                                 +sum(fs%divw_y(:,i,j,k)*Tyz(i,j:j+1,k))     &
-                        &                                                 +sum(fs%divw_z(:,i,j,k)*stress(i,j,k-1:k,6)))*time%dt
-                     end do
-                  end do
-               end do
-               ! Clean up
-               deallocate(Txy,Tyz,Tzx)
-            end block polymer_stress
+            !    ! Allocate work arrays
+            !    allocate(Txy   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+            !    allocate(Tyz   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+            !    allocate(Tzx   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+            !    ! Build liquid stress tensor
+            !    select case (ve%model)
+            !     case (fenep, oldroydb)
+            !       call ve%get_relax_varyRelaxTime(relaxTime,stress,time%dt)
+            !       do k=cfg%kmino_,cfg%kmaxo_
+            !          do j=cfg%jmino_,cfg%jmaxo_
+            !             do i=cfg%imino_,cfg%imaxo_
+            !                if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
+            !                mixvisc = MixViscosity(i,j,k)
+            !                do n=1,6
+            !                   stress(i,j,k,n)=-mixvisc*stress(i,j,k,n)
+            !                end do
+            !             end do
+            !          end do
+            !       end do
+            !       ! do n=1,6
+            !       !    stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
+            !       ! end do
+            !     case (eptt,lptt)
+            !       stress=0.0_WP
+            !       coeff=ve%visc_p/(ve%trelax*(1-ve%affinecoeff))
+            !       do n=1,6
+            !          do k=cfg%kmino_,cfg%kmaxo_
+            !             do j=cfg%jmino_,cfg%jmaxo_
+            !                do i=cfg%imino_,cfg%imaxo_
+            !                   if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
+            !                   stress(i,j,k,1)=coeff*(ve%SC(i,j,k,1)-1.0_WP) !> xx tensor component
+            !                   stress(i,j,k,2)=coeff*(ve%SC(i,j,k,2)-0.0_WP) !> xy tensor component
+            !                   stress(i,j,k,3)=coeff*(ve%SC(i,j,k,3)-0.0_WP) !> xz tensor component
+            !                   stress(i,j,k,4)=coeff*(ve%SC(i,j,k,4)-1.0_WP) !> yy tensor component
+            !                   stress(i,j,k,5)=coeff*(ve%SC(i,j,k,5)-0.0_WP) !> yz tensor component
+            !                   stress(i,j,k,6)=coeff*(ve%SC(i,j,k,6)-1.0_WP) !> zz tensor component
+            !                end do
+            !             end do
+            !          end do
+            !       end do
+            !    end select
+            !    ! Interpolate tensor components to cell edges
+            !    do k=cfg%kmin_,cfg%kmax_+1
+            !       do j=cfg%jmin_,cfg%jmax_+1
+            !          do i=cfg%imin_,cfg%imax_+1
+            !             Txy(i,j,k)=sum(fs%itp_xy(:,:,i,j,k)*stress(i-1:i,j-1:j,k,2))
+            !             Tyz(i,j,k)=sum(fs%itp_yz(:,:,i,j,k)*stress(i,j-1:j,k-1:k,5))
+            !             Tzx(i,j,k)=sum(fs%itp_xz(:,:,i,j,k)*stress(i-1:i,j,k-1:k,3))
+            !          end do
+            !       end do
+            !    end do
+            !    ! Add divergence of stress to residual
+            !    do k=fs%cfg%kmin_,fs%cfg%kmax_
+            !       do j=fs%cfg%jmin_,fs%cfg%jmax_
+            !          do i=fs%cfg%imin_,fs%cfg%imax_
+            !             if (fs%umask(i,j,k).eq.0) resU(i,j,k)=resU(i,j,k)+(sum(fs%divu_x(:,i,j,k)*stress(i-1:i,j,k,1))&
+            !             &                                                 +sum(fs%divu_y(:,i,j,k)*Txy(i,j:j+1,k))     &
+            !             &                                                 +sum(fs%divu_z(:,i,j,k)*Tzx(i,j,k:k+1)))*time%dt
+            !             if (fs%vmask(i,j,k).eq.0) resV(i,j,k)=resV(i,j,k)+(sum(fs%divv_x(:,i,j,k)*Txy(i:i+1,j,k))     &
+            !             &                                                 +sum(fs%divv_y(:,i,j,k)*stress(i,j-1:j,k,4))&
+            !             &                                                 +sum(fs%divv_z(:,i,j,k)*Tyz(i,j,k:k+1)))*time%dt
+            !             if (fs%wmask(i,j,k).eq.0) resW(i,j,k)=resW(i,j,k)+(sum(fs%divw_x(:,i,j,k)*Tzx(i:i+1,j,k))     &
+            !             &                                                 +sum(fs%divw_y(:,i,j,k)*Tyz(i,j:j+1,k))     &
+            !             &                                                 +sum(fs%divw_z(:,i,j,k)*stress(i,j,k-1:k,6)))*time%dt
+            !          end do
+            !       end do
+            !    end do
+            !    ! Clean up
+            !    deallocate(Txy,Tyz,Tzx)
+            ! end block polymer_stress
 
 
             ! Form implicit residuals
@@ -932,27 +933,27 @@ contains
             ! Apply other boundary conditions and update momentum
             call fs%rho_multiply()
 
+            call fs%apply_bcond(time%t,time%dt)
             fs_bc : block
                use lowmach_class, only: bcond
                type(bcond), pointer :: mybc
                integer :: n,i,j,k
                ! Apply all other boundary conditions
-               call fs%get_bcond('leftwall',mybc)
+               call fs%get_bcond('inflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs%U(i,j,k) = inflowVelocity ; fs%rhoU(i,j,k) = rho*inflowVelocity
+               end do
+               call fs%get_bcond('bottom',mybc)
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
                   fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
                   fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
                end do
-               call fs%get_bcond('rightwall',mybc)
-               do n=1,mybc%itr%no_
-                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-                  fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
-                  fs%V(i,j,k) = shearVel ; fs%rhoV(i,j,k) = rho*shearVel
-               end do
-               call fs%apply_bcond(time%t,time%dt)
             end block fs_bc
 
             ! Solve Poisson equation
+            call fs%correct_mfr(drhodt=resRHO)
             call fs%get_div(drhodt=resRHO)
             fs%psolv%rhs=-fs%cfg%vol*fs%div/time%dtmid
             fs%psolv%sol=0.0_WP
@@ -991,7 +992,6 @@ contains
          ! Perform and output monitoring
          call fs%get_max()
          call vf%get_max()
-         call getDiffMax()
          if (stabilization) then
             call ve%get_max_reconstructed()
          end if

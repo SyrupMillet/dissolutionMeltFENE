@@ -2,23 +2,24 @@
 Partition : 8 1 1
 
 # Mesh definition
-Lx : 0.01
-Ly : 0.01
-Lz : 0.00015625
-nx : 64
-ny : 64
+Lx : 0.05
+Ly : 0.025
+Lz : 0.0001953125
+nx : 256
+ny : 128
 nz : 1
 polymer diameter : 0.05
 
 # Fluid properties
-Dynamic viscosity:          0.001
+Dynamic viscosity:          0.01
 Density :                   1000
 
-Shear velocity : 0.01
+Shear velocity : 1.0
+inflow velocity : 0.1
 
 # volume fraction diffusion coefficient
 diffusion coefficient : 5e-6
-diffusion coefficient 0 : 10e-9
+diffusion coefficient 0 : 5e-8
 scaling factor : 7
 
 # Non-Newtonian modeling                    
@@ -28,12 +29,12 @@ Maximum polymer extensibility : 10
 Max Mixture viscosity : 10.0
 
 # Time integration
-Max timestep size : 1e-5
+Max timestep size : 1e-3
 Max cfl number :    0.95
 Max time :          50
 
 # Ensight output
-Ensight output period : 1e-1
+Ensight output period : 0.1
 
 # Pressure solver
 Pressure tolerance : 	1e-5
