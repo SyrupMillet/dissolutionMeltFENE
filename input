@@ -26,10 +26,10 @@ scaling factor : 7
 Polymer viscosity :             0.005
 Polymer relaxation time :       1e-4
 Maximum polymer extensibility : 10
-Max Mixture viscosity : 10.0
+Max Mixture viscosity : 1.0
 
 # Time integration
-Max timestep size : 1e-3
+Max timestep size : 1e-4
 Max cfl number :    0.95
 Max time :          50
 
