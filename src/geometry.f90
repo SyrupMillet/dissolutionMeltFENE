@@ -8,11 +8,7 @@ module geometry
    !> Single config
    type(config), public :: cfg
 
-   !> Mesh info
-   integer :: nx
-   real(WP) :: Lx
-
-   public :: geometry_init,nx,Lx
+   public :: geometry_init
 
 contains
 
@@ -38,17 +34,17 @@ contains
 
          ! Create simple rectilinear grid
          do i=1,nx+1
-            x(i)=real(i-1,WP)*Lx/real(nx,WP)-0.5_WP*Lx
+            x(i)=real(i-1,WP)*Lx/real(nx,WP)
          end do
          do j=1,ny+1
-            y(j)=real(j-1,WP)*Ly/real(ny,WP)-0.5_WP*Ly
+            y(j)=real(j-1,WP)*Ly/real(ny,WP)
          end do
          do k=1,nz+1
             z(k)=real(k-1,WP)*Lz/real(nz,WP)-0.5_WP*Lz
          end do
 
          ! General serial grid object
-         grid=sgrid(coord=cartesian,no=3,x=x,y=y,z=z,xper=.true.,yper=.true.,zper=.true.,name='box')
+         grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.false.,zper=.true.,name='box')
 
       end block create_grid
 
@@ -62,9 +58,20 @@ contains
          cfg=config(grp=group,decomp=partition,grid=grid)
       end block create_cfg
 
-      ! Create masks for this config
+      ! Create walls for x<0
       create_walls: block
+         integer :: i,j,k
          cfg%VF=1.0_WP
+         do k = cfg%kmino_, cfg%kmaxo_
+            do j = cfg%jmino_, cfg%jmaxo_
+               do i = cfg%imino_, cfg%imaxo_
+                  if (j.lt.cfg%jmin) then
+                     cfg%VF(i,j,k)=0.0_WP
+                  end if
+               end do
+            end do
+         end do
+
       end block create_walls
 
    end subroutine geometry_init
