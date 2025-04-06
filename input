@@ -19,22 +19,22 @@ inflow velocity : 0.1
 
 # volume fraction diffusion coefficient
 diffusion coefficient : 5e-6
-diffusion coefficient 0 : 5e-8
-scaling factor : 7
+diffusion coefficient 0 : 5e-7
+scaling factor : 5
 
 # Non-Newtonian modeling                    
 Polymer viscosity :             0.005
 Polymer relaxation time :       1e-4
-Maximum polymer extensibility : 10
+Maximum polymer extensibility : 5
 Max Mixture viscosity : 1.0
 
 # Time integration
 Max timestep size : 1e-4
 Max cfl number :    0.95
-Max time :          50
+Max time :          10
 
 # Ensight output
-Ensight output period : 0.1
+Ensight output period : 1e-2
 
 # Pressure solver
 Pressure tolerance : 	1e-5

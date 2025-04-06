@@ -288,7 +288,7 @@ contains
             end do
          end do
       end do
-      call cfg%sync(relaxTime)
+      call cfg%sync(MixViscosity)
    end subroutine getMixViscosity
 
    !> Function that localizes the left (x-) of the domain
@@ -408,6 +408,7 @@ contains
          vf=vdscalar(cfg=cfg,scheme=bquick,name='Volume fraction')
          ! Define bc
          call vf%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domainsc,dir='x-')
+         call vf%add_bcond(name='outflow',type=neumann      ,locator=right_of_domain,dir='x+')
          call vf%add_bcond(name='bottom',type=dirichlet      ,locator=bottom_of_domainsc,dir='y-')
          ! Configure implicit scalar solver
          vfs = ddadi(cfg=cfg,name='Volume fraction',nst=13)
@@ -422,9 +423,6 @@ contains
          integer :: i,j,k
          ! Create FENE model solver
          call ve%init(cfg=cfg,model=fenep,scheme=upwind,name='FENE')
-         ! Define bc
-         call vf%add_bcond(name='leftwall',type=neumann      ,locator=left_of_domainsc,dir='x-')
-         call vf%add_bcond(name='rightwall',type=dirichlet,   locator=right_of_domain,dir='x+')
          ! Maximum extensibility of polymer chain
          call param_read('Maximum polymer extensibility',ve%Lmax)
          ! Relaxation time for polymer
@@ -543,6 +541,7 @@ contains
          call param_read('scaling factor',ad)
          call getDiffutionCoeff()
 
+         call vf%apply_bcond(time%t,time%dt)
          ! Apply all other boundary conditions
          call vf%get_bcond('inflow',mybc)
          do n=1,mybc%itr%no_
@@ -553,8 +552,7 @@ contains
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             vf%SC(i,j,k) = 0.5_WP
-         end do
-         call vf%apply_bcond(time%t,time%dt)
+         end do 
 
       end block initialize_volume_fraction
 
@@ -811,6 +809,7 @@ contains
             vf%SC = 2.0_WP*vf%SC - vf%SCold + resVF
 
             ! Apply boundary conditions
+            call vf%apply_bcond(time%t,time%dt)
             vf_bc : block
                use vdscalar_class, only: bcond
                type(bcond), pointer :: mybc
@@ -826,7 +825,6 @@ contains
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
                   vf%SC(i,j,k) = 0.5_WP
                end do
-               call vf%apply_bcond(time%t,time%dt)
             end block vf_bc
 
             ! ===================== Velocity Solver =======================
